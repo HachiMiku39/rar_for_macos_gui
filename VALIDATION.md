@@ -1,0 +1,23 @@
+# 验证记录
+
+验证时间：2026-09-27。本机 Apple Silicon，Xcode 27 beta / Swift 6.4，以 Swift 5 语言模式编译，部署目标 macOS 14。
+
+- Xcode Debug、Release 构建通过。
+- 0.3 版新增语言包完整性、占位符、回退与无效输入测试；本次结果见下文。
+- 官方 7-Zip 26.03 Universal 已内置；对应完整源码与许可随附。RAR for macOS ARM 7.23 仅用于开发测试，不进入交付包。
+- 测试包含：路径穿越和模式字符拒绝；命令参数中无密码；RAR/7z 文本列表解析；中文及空格文件名；RAR5 + 文件名加密 + 3% 恢复记录的创建/列出/选中解压/测试；错误密码返回非零；ZIP 和加密 7z 往返；1 MB RAR 分卷、10% 恢复卷与追加恢复记录；进程取消。
+- 已启动 Debug 应用，并实际检查主窗口、设置窗口和 RAR 路径检测，检测返回成功。未完成 Finder 所有入口与全部按钮的自动化端到端测试。
+- 0.2 新增实测：内置 7zz 读取和解压加密 RAR；ISO9660/Joliet 镜像列表与选中解压；TAR、tar.gz、tar.bz2、tar.xz 的透明预处理/列表/解压；UUE 解码/列表/解压；无 Physical Size 的压缩流头部解析；ISO 空链接字段。以上往返均核对实际文件内容。
+- CAB/ARJ/LZH/Z/ZST 等为内置 7zz 能力清单确认，尚无逐格式实测，不宣称所有子格式或 WinRAR 历史格式兼容。
+
+构建环境备注：默认 Command Line Tools 的 Swift Package 链接器与清单库不匹配，因此显式使用 Xcode 的工具链。受限会话中的 Xcode 宏子进程需要构建命令加 `OTHER_SWIFT_FLAGS=-disable-sandbox`；这是本次编译器子进程设置，不是关闭 macOS 安全保护，也未写入工程默认设置。Swift Package 验证使用 `--build-system native --disable-sandbox` 和可写缓存目录。
+
+交付的 `.app` 为 ARM64 + x86_64 Universal Release 构建，非 Developer ID 签名/公证产品。跨设备分发前应在 Xcode 中配置团队、签名和公证；源码项目可按目标机器重新构建。尚未验证 Intel 机器或 macOS 14 实机运行。
+
+## 0.3 本地化与安装包
+
+本次 Release 构建成功；13 项测试全部通过，0 失败、0 跳过。
+
+提供简体中文、英语、日语完整应用文字目录，JSON 语言包导入及法语部分翻译 Demo。新增测试校验三种内置语言键集合相同、占位符匹配、法语缺失条目回退英语、文件名内的占位符保持原样，以及恶意路径/控制字符/超大文件/未知键拒绝。
+
+RAR 下载入口使用官方 HTTPS 网页，选择架构由用户在官网完成，不自动下载或执行 RAR。发布包为包含 Applications 快捷入口的 Universal DMG，同时提供 ZIP 和源码包。
