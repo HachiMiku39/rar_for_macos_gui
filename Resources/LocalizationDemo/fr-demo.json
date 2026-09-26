@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "id": "fr-demo",
+  "name": "Français (démo)",
+  "locale": "fr",
+  "strings": {
+    "打开": "Ouvrir",
+    "创建": "Créer",
+    "解压全部": "Tout extraire",
+    "取消": "Annuler",
+    "语言": "Langue",
+    "{0} 个条目": "{0} éléments"
+  }
+}
