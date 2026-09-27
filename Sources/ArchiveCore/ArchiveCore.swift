@@ -105,6 +105,8 @@ public extension ArchiveEntry {
         return "File"
     }
     var symbol: String {
+        if suffix == "ipa" { return "iphone" }
+        if suffix == "apk" { return "apps.iphone" }
         switch category {
         case "Folder": return "folder.fill"
         case "Archive": return "archivebox.fill"
@@ -146,7 +148,7 @@ public enum PreviewSafety {
 }
 
 public enum ArchiveCommands {
-    public static let extensions = ["rar", "r00", "zip", "zipx", "z01", "7z", "001", "tar", "iso", "udf", "cab", "arj", "lzh", "lha", "gz", "gzip", "tgz", "tpz", "bz2", "bzip2", "tbz", "tbz2", "xz", "txz", "z", "taz", "zst", "tzst", "jar", "uue", "uu", "dmg", "img", "wim", "swm", "esd", "xar", "pkg", "cpio", "rpm", "deb", "lzma", "epub", "apk", "ova"]
+    public static let extensions = ["rar", "r00", "zip", "zipx", "z01", "7z", "001", "tar", "iso", "udf", "cab", "arj", "lzh", "lha", "gz", "gzip", "tgz", "tpz", "bz2", "bzip2", "tbz", "tbz2", "xz", "txz", "z", "taz", "zst", "tzst", "jar", "uue", "uu", "dmg", "img", "wim", "swm", "esd", "xar", "pkg", "cpio", "rpm", "deb", "lzma", "epub", "apk", "ipa", "ova"]
     public static func isCompressedTar(_ url: URL) -> Bool {
         let name = url.lastPathComponent.lowercased()
         return [".tar.gz", ".tar.bz2", ".tar.xz", ".tar.z", ".tar.zst", ".tar.lzma"].contains(where: name.hasSuffix) || ["tgz", "tpz", "tbz", "tbz2", "txz", "taz", "tzst"].contains(url.pathExtension.lowercased())
@@ -212,7 +214,7 @@ public enum ArchiveCommands {
         func flush() {
             let key = backend == .rar ? "Name" : "Path"
             if let path = fields[key], !path.isEmpty, fields["Type"] != "RAR 5", fields["Type"] != "RAR 4", !(backend == .sevenZip && fields["Type"] != nil) {
-                entries.append(ArchiveEntry(path: path, size: fields["Size"] ?? "", modified: fields["mtime"] ?? fields["Modified"] ?? "", isDirectory: fields["Type"] == "Directory" || fields["Folder"] == "+" || (fields["Attributes"] ?? "").hasPrefix("D"), isLink: fields.contains(where: { $0.key.lowercased().contains("link") && !$0.value.isEmpty }) || (fields["Type"] ?? "").lowercased().contains("link") || (fields["Mode"] ?? "").hasPrefix("l")))
+                entries.append(ArchiveEntry(path: path, size: fields["Size"] ?? "", modified: fields["mtime"] ?? fields["Modified"] ?? "", isDirectory: fields["Type"] == "Directory" || fields["Folder"] == "+" || (fields["Attributes"] ?? "").hasPrefix("D"), isLink: fields.contains(where: { $0.key.lowercased().contains("link") && !$0.value.isEmpty }) || (fields["Type"] ?? "").lowercased().contains("link") || (fields["Mode"] ?? "").hasPrefix("l") || (fields["Attributes"] ?? "").split(separator: " ").contains(where: { $0.count == 10 && $0.hasPrefix("l") })))
             }
             fields = [:]
         }
@@ -252,7 +254,7 @@ public final class CLIRunner: @unchecked Sendable {
         child.terminate()
         DispatchQueue.global().asyncAfter(deadline: .now() + 2) { if child.isRunning { kill(child.processIdentifier, SIGKILL) } }
     }
-    public func run(executable: String, arguments: [String], directory: URL? = nil, password: String = "", outputFile: URL? = nil, update: @escaping (String, String) -> Void) async throws -> CLIResult {
+    public func run(executable: String, arguments: [String], directory: URL? = nil, password: String = "", outputFile: URL? = nil, outputLimit: Int? = nil, update: @escaping (String, String) -> Void) async throws -> CLIResult {
         guard executable.hasPrefix("/"), FileManager.default.isExecutableFile(atPath: executable) else { throw ArchiveError.details("The engine path must be an absolute path to an executable: {0}", [executable]) }
         _ = try ArchiveCommands.passwordSwitch(password)
         lock.withLock { cancelled = false }
@@ -267,7 +269,7 @@ public final class CLIRunner: @unchecked Sendable {
                 var binaryOutput: FileHandle?
                 if let outputFile {
                     guard FileManager.default.createFile(atPath: outputFile.path, contents: nil, attributes: [.posixPermissions: 0o600]), let handle = try? FileHandle(forWritingTo: outputFile) else { continuation.resume(throwing: ArchiveError.invalid("Cannot create temporary output.")); return }
-                    binaryOutput = handle; child.standardOutput = handle
+                    binaryOutput = handle
                 }
                 defer { try? binaryOutput?.close() }
                 self.lock.lock(); self.process = child; self.lock.unlock()
@@ -283,7 +285,8 @@ public final class CLIRunner: @unchecked Sendable {
                 try? input.fileHandleForWriting.close()
                 let group = DispatchGroup(), outputLock = NSLock()
                 var stdout = Data(), stderr = Data()
-                let streams = outputFile == nil ? [(out.fileHandleForReading, false), (err.fileHandleForReading, true)] : [(err.fileHandleForReading, true)]
+                var binaryCount = 0, binaryFailure = false
+                let streams = [(out.fileHandleForReading, false), (err.fileHandleForReading, true)]
                 for (handle, isError) in streams {
                     group.enter()
                     DispatchQueue.global().async {
@@ -291,6 +294,17 @@ public final class CLIRunner: @unchecked Sendable {
                             let data = handle.availableData
                             if data.isEmpty { break }
                             outputLock.lock()
+                            if !isError, let binaryOutput {
+                                if !binaryFailure {
+                                    if let outputLimit, data.count > outputLimit - binaryCount {
+                                        binaryFailure = true; self.cancel()
+                                    } else {
+                                        do { try binaryOutput.write(contentsOf: data); binaryCount += data.count }
+                                        catch { binaryFailure = true; self.cancel() }
+                                    }
+                                }
+                                outputLock.unlock(); continue
+                            }
                             if isError { stderr.append(data) } else { stdout.append(data) }
                             // Bound retained output. Truncated listings are refused by the model.
                             if stdout.count > 16_000_000 { self.cancel() }
@@ -308,7 +322,7 @@ public final class CLIRunner: @unchecked Sendable {
                 func redact(_ data: Data) -> String { let s = String(decoding: data, as: UTF8.self); return password.isEmpty ? s : s.replacingOccurrences(of: password, with: "••••") }
                 let a = redact(stdout), b = redact(stderr)
                 update(a, b)
-                continuation.resume(returning: CLIResult(status: child.terminationStatus, stdout: a, stderr: b, cancelled: wasCancelled, listingOutput: String(decoding: stdout, as: UTF8.self)))
+                continuation.resume(returning: CLIResult(status: binaryFailure ? 2 : child.terminationStatus, stdout: a, stderr: b + (binaryFailure ? "\nBinary output limit exceeded or write failed." : ""), cancelled: wasCancelled, listingOutput: String(decoding: stdout, as: UTF8.self)))
             }
         }
     }
