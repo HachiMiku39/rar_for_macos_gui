@@ -20,6 +20,17 @@ struct ContentView: View {
                     Text(language.text("{0} items", String(model.entries.count))).foregroundStyle(.secondary)
                 }.padding(12)
                 if model.archive != nil { navigationBar }
+                if let kind = model.packageKind {
+                    HStack {
+                        Label(language.text(kind.rawValue), systemImage: kind == .ipa ? "iphone" : "apps.iphone")
+                        Text(language.text("Read-only package · Extraction does not remove protection")).font(.caption).foregroundStyle(.secondary)
+                        Spacer()
+                        Button(language.text(model.inspecting ? "Inspection in progress…" : "Inspect Package")) { model.inspectPackage() }.disabled(model.busy)
+                    }.padding(.horizontal, 14).padding(.bottom, 8)
+                    if kind != .ipa && kind != .apk {
+                        Text(language.text("Package structure does not match IPA or APK. It can still be browsed as an archive.")).font(.caption).foregroundStyle(.orange).padding(.horizontal, 14)
+                    }
+                }
                 if model.archive == nil {
                     ContentUnavailableView {
                         Label(language.text("Archives, neatly organized"), systemImage: "archivebox")
@@ -80,6 +91,7 @@ struct ContentView: View {
         }
         .dropDestination(for: URL.self) { urls, _ in guard !model.busy else { return false }; model.receive(urls); return true }
         .sheet(isPresented: $model.showCreate) { CreateView().environmentObject(model) }
+        .sheet(isPresented: $model.showPackage) { PackageInspectionView().environmentObject(model).environmentObject(language) }
         .alert(language.text("Operation Unsuccessful"), isPresented: Binding(get: { model.error != nil }, set: { if !$0 { model.error = nil } })) { Button(language.text("OK")) { model.error = nil } } message: { Text(language.text(model.error ?? "")) }
         .frame(minWidth: 900, minHeight: 600)
     }
@@ -104,7 +116,7 @@ struct ContentView: View {
             }
             Text(language.text(model.status)).font(.caption).lineLimit(2)
             Spacer()
-            if model.busy { Button(language.text("Cancel Task")) { model.runner.cancel() } }
+            if model.busy { Button(language.text("Cancel Task")) { model.cancelCurrentTask() } }
         }.padding(10).background(.bar)
     }
     private var entryTable: some View {
@@ -153,6 +165,7 @@ struct ContentView: View {
             }
             Section(language.text("Supported Formats")) {
                 Text(language.text("7-Zip 26.03 included"))
+                Text("IPA · APK")
                 Text("RAR · ZIP · 7z · TAR · ISO")
                 Text("CAB · ARJ · LZH · GZ · UUE…")
             }.foregroundStyle(.secondary).font(.caption)
@@ -163,6 +176,47 @@ struct ContentView: View {
             Text(title).font(.caption).foregroundStyle(.secondary)
             ScrollView([.vertical, .horizontal]) { Text(text.isEmpty ? "—" : text).font(.system(size: 11, design: .monospaced)).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading) }
         }.padding(10).frame(minWidth: 180, maxWidth: .infinity)
+    }
+}
+
+struct PackageInspectionView: View {
+    @EnvironmentObject var model: Model
+    @EnvironmentObject var language: AppLanguage
+    @Environment(\.dismiss) var dismiss
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                Label(language.text("Package Inspection"), systemImage: "shippingbox").font(.title2)
+                Spacer()
+                if model.inspecting { ProgressView().controlSize(.small); Button(language.text("Cancel Task")) { model.cancelInspection() } }
+                Button(language.text("Close")) { dismiss() }.keyboardShortcut(.cancelAction)
+            }
+            Text(model.archive?.lastPathComponent ?? "").foregroundStyle(.secondary)
+            Text(language.text("Inspection uses a temporary copy and never runs package code. You can close this panel and continue browsing.")).font(.caption)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    if let report = model.packageReport {
+                        Text(language.text(report.kind.rawValue)).font(.headline)
+                        ForEach(report.fields) { field in
+                            HStack(alignment: .top) { Text(language.text(field.label)).foregroundStyle(.secondary).frame(width: 190, alignment: .leading); Text(language.text(field.value)).textSelection(.enabled); Spacer() }
+                        }
+                        Divider()
+                        Text(language.text("Protection") + ": " + language.text(report.protection)).font(.headline)
+                        ForEach(Array(report.warnings.enumerated()), id: \.offset) { _, warning in Text(language.text(warning)).foregroundStyle(.orange).textSelection(.enabled) }
+                        ForEach(Array(report.evidence.enumerated()), id: \.offset) { _, evidence in Text(evidence).font(.caption.monospaced()).textSelection(.enabled) }
+                        ForEach(report.slices) { slice in
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(slice.path).font(.caption.monospaced()).textSelection(.enabled)
+                                Text(slice.architecture + " · " + language.text(slice.state))
+                                if let cryptid = slice.cryptid { Text("cryptid=\(cryptid) · cryptoff=\(slice.cryptoff ?? 0) · cryptsize=\(slice.cryptsize ?? 0)").font(.caption).foregroundStyle(.secondary) }
+                            }.padding(10).frame(maxWidth: .infinity, alignment: .leading).background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
+                        }
+                    } else { Text(language.text(model.inspecting ? "Reading metadata and protection markers…" : "Inspection cancelled. You can retry.")) }
+                    DisclosureGroup(language.text("Task Log")) { Text(model.inspectionLog).font(.caption.monospaced()).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading) }
+                }.frame(maxWidth: .infinity, alignment: .leading)
+            }
+            Button(language.text("Scan Again")) { model.inspectPackage() }.disabled(model.inspecting || model.busy)
+        }.padding(24).frame(width: 740, height: 640)
     }
 }
 

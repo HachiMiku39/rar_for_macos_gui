@@ -11,7 +11,7 @@ import AppKit
                 .environment(\.locale, language.locale)
                 .preferredColorScheme(model.colorScheme)
                 .onOpenURL { model.receive([$0]) }
-                .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in model.runner.cancel(); model.cleanOpenedCopies() }
+                .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in model.cancelInspection(); model.cancelCurrentTask(); model.cleanOpenedCopies() }
         }
         .defaultSize(width: 1080, height: 740)
         .commands {

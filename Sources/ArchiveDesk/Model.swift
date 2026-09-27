@@ -21,6 +21,15 @@ import ArchiveCore
     @Published var error: String?
     @Published var recent: [URL] = (UserDefaults.standard.stringArray(forKey: "recentArchives") ?? []).map { URL(fileURLWithPath: $0) }
     @Published var directory = ""
+    @Published var packageKind: PackageKind?
+    @Published var packageReport: PackageReport?
+    @Published var inspecting = false
+    @Published var showPackage = false
+    @Published var inspectionLog = ""
+    private var inspectionTask: Task<Void, Never>?
+    private var exportTask: Task<Void, Never>?
+    private let inspectionRunner = CLIRunner()
+    private var inspectionID = UUID()
     @Published var appearance = UserDefaults.standard.string(forKey: "appearance") ?? "system" {
         didSet { UserDefaults.standard.set(appearance, forKey: "appearance") }
     }
@@ -99,6 +108,7 @@ import ArchiveCore
     }
     func open(_ url: URL) {
         guard !busy else { return }
+        cancelInspection(); packageKind = nil; packageReport = nil
         session = nil; archive = url; entries = []; selection = []; password = ""; filter = ""; directory = ""
         recent.removeAll { $0 == url }; recent.insert(url, at: 0); recent = Array(recent.prefix(10))
         UserDefaults.standard.set(recent.map(\.path), forKey: "recentArchives")
@@ -115,9 +125,39 @@ import ArchiveCore
                 let parsed = result.archiveEntries(backend: .sevenZip)
                 guard Set(parsed.map(\.path)).count == parsed.count else { self.error = self.language.text("Duplicate paths prevent reliable item selection."); return }
                 self.entries = parsed
+                let kind = PackageInspector.kind(archive: archive, entries: parsed)
+                self.packageKind = kind == .ipa || kind == .apk || ["ipa", "apk"].contains(archive.pathExtension.lowercased()) ? kind : nil
+                self.packageReport = nil
                 self.status = self.language.text("{0} items · {1}", String(parsed.count), archive.lastPathComponent)
             }
         } catch { self.error = language.message(error) }
+    }
+    func cancelInspection() { inspectionTask?.cancel(); inspectionRunner.cancel(); inspectionID = UUID() }
+    func cancelCurrentTask() { exportTask?.cancel(); runner.cancel() }
+    func inspectPackage() {
+        showPackage = true
+        guard !inspecting, !busy, let archive, packageKind != nil else { return }
+        packageReport = nil; inspectionLog = ""; inspecting = true
+        let id = UUID(); inspectionID = id
+        let engine = resolvedSevenZip, secret = password, engineRunner = inspectionRunner
+        let rulesURL = Bundle.main.resourceURL?.appendingPathComponent("PackageRules/apk-packers.json")
+        let rules = rulesURL.flatMap { try? Data(contentsOf: $0) }.flatMap { try? JSONDecoder().decode([PackerRule].self, from: $0) } ?? []
+        inspectionTask = Task {
+            let work = Task.detached(priority: .utility) {
+                try await PackageInspector.inspect(archive: archive, sevenZip: engine, password: secret, runner: engineRunner, rules: rules) { a, b in
+                    Task { @MainActor in if self.inspectionID == id { self.inspectionLog = String((a + "\n" + b).suffix(100_000)) } }
+                }
+            }
+            do {
+                let report = try await withTaskCancellationHandler(operation: { try await work.value }, onCancel: { work.cancel(); engineRunner.cancel() })
+                if inspectionID == id { packageReport = report }
+            } catch {
+                if inspectionID == id {
+                    packageReport = PackageReport(kind: packageKind ?? .other, warnings: [error.localizedDescription])
+                }
+            }
+            inspecting = false
+        }
     }
     func extract(selected: Bool) {
         guard !busy else { return }
@@ -133,9 +173,30 @@ import ArchiveCore
         let destination = parent.appendingPathComponent(archive.deletingPathExtension().lastPathComponent + "-" + String(UUID().uuidString.prefix(8)), isDirectory: true)
         do {
             try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: false)
+            if packageKind != nil { exportPackage(archive, to: destination, selected: chosen); return }
             let args = try ArchiveCommands.extract(session?.workingURL ?? archive, destination: destination, selected: chosen, password: password, using: .sevenZip)
             launch(language.text("Extracting to {0}", destination.lastPathComponent), executable: executable(for: archive), args: args, secret: password) { _ in NSWorkspace.shared.activateFileViewerSelecting([destination]) }
         } catch { self.error = language.message(error) }
+    }
+    private func exportPackage(_ archive: URL, to destination: URL, selected: [String]) {
+        busy = true; progress = nil; stdout = ""; stderr = ""; status = language.text("Exporting Package")
+        let engine = resolvedSevenZip, secret = password, engineRunner = runner
+        exportTask = Task {
+            defer { busy = false; progress = nil }
+            do {
+                let work = Task.detached(priority: .userInitiated) {
+                    try await PackageExporter.extract(archive: archive, destination: destination, selected: selected, sevenZip: engine, password: secret, runner: engineRunner) { a, b in
+                        Task { @MainActor in self.stdout = String(a.suffix(100_000)); self.stderr = String(b.suffix(100_000)) }
+                    }
+                }
+                let renamed = try await withTaskCancellationHandler(operation: { try await work.value }, onCancel: { work.cancel(); engineRunner.cancel() })
+                status = renamed == 0 ? language.text("Package Export Complete") : language.text("Export complete. Conflicting names were renamed; see the path-map JSON.")
+                NSWorkspace.shared.activateFileViewerSelecting([destination])
+            } catch {
+                self.error = language.text(error.localizedDescription)
+                status = language.text("Export incomplete. Partial files may remain in the destination.")
+            }
+        }
     }
     func test() {
         guard !busy else { return }
