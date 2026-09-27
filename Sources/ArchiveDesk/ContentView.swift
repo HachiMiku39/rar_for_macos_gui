@@ -7,7 +7,7 @@ import ArchiveCore
 struct ContentView: View {
     @EnvironmentObject var model: Model
     @EnvironmentObject var language: AppLanguage
-    @State private var showLog = true
+    @State private var showLog = false
     private var splitView: some View {
         NavigationSplitView {
             sidebar.disabled(model.busy).navigationSplitViewColumnWidth(min: 180, ideal: 210)
@@ -18,7 +18,8 @@ struct ContentView: View {
                     Text(model.archive?.path ?? "ArchiveDesk").lineLimit(1).truncationMode(.middle).textSelection(.enabled)
                     Spacer()
                     Text(language.text("{0} 个条目", String(model.entries.count))).foregroundStyle(.secondary)
-                }.padding(12).background(.bar)
+                }.padding(12)
+                if model.archive != nil { navigationBar }
                 if model.archive == nil {
                     ContentUnavailableView {
                         Label(language.text("压缩文件，有条有理"), systemImage: "archivebox")
@@ -30,7 +31,6 @@ struct ContentView: View {
                     }.frame(maxHeight: .infinity)
                 } else {
                     entryTable
-                    .contextMenu { Button(language.text("解压选中项…")) { model.extract(selected: true) }.disabled(model.selection.isEmpty || model.busy) }
                 }
                 Divider()
                 HStack {
@@ -39,7 +39,7 @@ struct ContentView: View {
                     Button(language.text("清除密码")) { model.password = "" }
                     Spacer()
                     Toggle(language.text("任务日志"), isOn: $showLog).toggleStyle(.checkbox)
-                }.padding(10).disabled(model.busy)
+                }.padding(10).archiveGlass().padding(.horizontal, 10).disabled(model.busy)
                 if showLog {
                     HSplitView {
                         logPane(language.text("标准输出 stdout"), text: model.stdout)
@@ -55,10 +55,8 @@ struct ContentView: View {
         .searchable(text: $model.filter, prompt: language.text("筛选路径"))
         .toolbar {
             ToolbarItemGroup {
-                HStack {
                 Button { model.chooseArchive() } label: { Label(language.text("打开"), systemImage: "folder") }
                 Button { model.chooseInputs() } label: { Label(language.text("创建"), systemImage: "plus.square") }
-                Divider()
                 Button { model.extract(selected: false) } label: { Label(language.text("解压全部"), systemImage: "tray.and.arrow.down") }.disabled(model.entries.isEmpty)
                 Button { model.extract(selected: true) } label: { Label(language.text("解压选中"), systemImage: "checklist") }.disabled(model.selection.isEmpty)
                 Button { model.test() } label: { Label(language.text("测试"), systemImage: "checkmark.shield") }.disabled(model.archive == nil)
@@ -66,13 +64,34 @@ struct ContentView: View {
                     Button(language.text("添加 3% Recovery Record…")) { model.recovery("rr3p") }
                     Button(language.text("创建 10% Recovery Volumes…")) { model.recovery("rv10p") }
                 } label: { Label(language.text("恢复数据"), systemImage: "cross.case") }.disabled(model.archive?.pathExtension.lowercased() != "rar")
-                }.disabled(model.busy)
+            }
+            ToolbarItem {
+                Menu {
+                    Picker(language.text("外观"), selection: $model.appearance) {
+                        Text(language.text("跟随系统")).tag("system")
+                        Text(language.text("日间模式")).tag("light")
+                        Text(language.text("夜间模式")).tag("dark")
+                    }
+                } label: { Label(language.text("外观"), systemImage: "circle.lefthalf.filled") }
             }
         }
         .dropDestination(for: URL.self) { urls, _ in guard !model.busy else { return false }; model.receive(urls); return true }
         .sheet(isPresented: $model.showCreate) { CreateView().environmentObject(model) }
         .alert(language.text("操作未完成"), isPresented: Binding(get: { model.error != nil }, set: { if !$0 { model.error = nil } })) { Button(language.text("好")) { model.error = nil } } message: { Text(language.text(model.error ?? "")) }
         .frame(minWidth: 900, minHeight: 600)
+    }
+    private var navigationBar: some View {
+        HStack(spacing: 12) {
+            Button { model.goUp() } label: { Image(systemName: "chevron.up") }
+                .disabled(model.directory.isEmpty).help(language.text("上一级"))
+            Button { model.navigate("") } label: { Image(systemName: "house") }.help(language.text("根目录"))
+            Text(model.directory.isEmpty ? language.text("根目录") : model.directory)
+                .lineLimit(1).truncationMode(.middle).font(.callout)
+            Spacer()
+            Text(language.text("{0} 个条目", String(model.visible.count))).font(.caption).foregroundStyle(.secondary)
+            Button(language.text("打开选中项")) { if let item = model.selectedEntry { model.activate(item) } }
+                .disabled(model.selectedEntry == nil || (model.selectedEntry?.category == "压缩包"))
+        }.padding(10).archiveGlass().padding(.horizontal, 10).padding(.bottom, 8).disabled(model.busy)
     }
     private var statusBar: some View {
         HStack {
@@ -88,10 +107,31 @@ struct ContentView: View {
     private var entryTable: some View {
         Table(model.visible, selection: $model.selection) {
             TableColumn(language.text("名称 / 路径")) { (item: ArchiveEntry) in
-                Label(item.path, systemImage: item.isDirectory ? "folder" : "doc")
+                HStack(spacing: 9) {
+                    Image(systemName: item.symbol).symbolRenderingMode(.hierarchical)
+                        .foregroundStyle(item.isDirectory ? Color.accentColor : item.category == "图片" ? .pink : item.category == "视频" ? .purple : item.category == "音频" ? .orange : .secondary)
+                        .frame(width: 22)
+                    Text(model.filter.isEmpty ? item.name : item.path).lineLimit(1)
+                }.help(item.category == "压缩包" ? language.text("暂不支持打开压缩包内的压缩包。") : item.path)
             }.width(min: 220)
+            TableColumn(language.text("文件类型")) { (item: ArchiveEntry) in
+                Text(item.isDirectory || item.suffix.isEmpty ? language.text(item.category) : item.suffix.uppercased() + " · " + language.text(item.category))
+                    .foregroundStyle(.secondary)
+            }.width(min: 105, ideal: 140)
             TableColumn(language.text("大小"), value: \ArchiveEntry.size).width(90)
             TableColumn(language.text("修改时间"), value: \ArchiveEntry.modified).width(170)
+        }
+        .contextMenu(forSelectionType: String.self) { ids in
+            Button(language.text("打开选中项")) {
+                if let item = model.visible.first(where: { ids.contains($0.id) }) { model.activate(item) }
+            }.disabled(ids.count != 1 || model.busy || model.visible.contains { ids.contains($0.id) && $0.category == "压缩包" })
+            Button(language.text("解压选中项…")) { model.selection = ids; model.extract(selected: true) }.disabled(ids.isEmpty || model.busy)
+        } primaryAction: { ids in
+            if ids.count == 1, let item = model.visible.first(where: { ids.contains($0.id) }) { model.activate(item) }
+        }
+        .onKeyPress(.return) {
+            guard let item = model.selectedEntry else { return .ignored }
+            model.activate(item); return .handled
         }
     }
     private var sidebar: some View {
@@ -102,6 +142,8 @@ struct ContentView: View {
                 SettingsLink { Label(language.text("CLI 设置"), systemImage: "gearshape") }
             }
             Section(language.text("最近打开")) {
+                Button { model.clearRecent() } label: { Label(language.text("清除历史记录"), systemImage: "clock.badge.xmark") }
+                    .disabled(model.recent.isEmpty && NSDocumentController.shared.recentDocumentURLs.isEmpty)
                 ForEach(model.recent, id: \.self) { url in
                     Button(url.lastPathComponent) { model.open(url) }.help(url.path)
                 }
@@ -154,6 +196,11 @@ struct SettingsView: View {
     @EnvironmentObject var language: AppLanguage
     var body: some View {
         Form {
+            Picker(language.text("外观"), selection: $model.appearance) {
+                Text(language.text("跟随系统")).tag("system")
+                Text(language.text("日间模式")).tag("light")
+                Text(language.text("夜间模式")).tag("dark")
+            }
             Picker(language.text("语言"), selection: $language.selected) {
                 Text(language.text("跟随系统")).tag("system")
                 ForEach(language.packs) { pack in Text(pack.name).tag(pack.id) }
@@ -193,6 +240,16 @@ struct SettingsView: View {
                 Button(language.text("检测")) { model.check(path.wrappedValue) }
                 Image(systemName: FileManager.default.isExecutableFile(atPath: path.wrappedValue) ? "checkmark.circle.fill" : "exclamationmark.circle").foregroundStyle(FileManager.default.isExecutableFile(atPath: path.wrappedValue) ? .green : .orange)
             }
+        }
+    }
+}
+
+private extension View {
+    @ViewBuilder func archiveGlass() -> some View {
+        if #available(macOS 26.0, *) {
+            self.glassEffect(.regular, in: .rect(cornerRadius: 14))
+        } else {
+            self.background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
         }
     }
 }

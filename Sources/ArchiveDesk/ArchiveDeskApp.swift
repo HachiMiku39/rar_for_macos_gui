@@ -9,8 +9,9 @@ import AppKit
             ContentView().environmentObject(model)
                 .environmentObject(language)
                 .environment(\.locale, language.locale)
+                .preferredColorScheme(model.colorScheme)
                 .onOpenURL { model.receive([$0]) }
-                .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in model.runner.cancel() }
+                .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in model.runner.cancel(); model.cleanOpenedCopies() }
         }
         .defaultSize(width: 1080, height: 740)
         .commands {
@@ -19,6 +20,6 @@ import AppKit
                 Button(language.text("创建 RAR…")) { model.chooseInputs() }.keyboardShortcut("n").disabled(model.busy)
             }
         }
-        Settings { SettingsView().environmentObject(model).environmentObject(language).environment(\.locale, language.locale) }
+        Settings { SettingsView().environmentObject(model).environmentObject(language).environment(\.locale, language.locale).preferredColorScheme(model.colorScheme) }
     }
 }

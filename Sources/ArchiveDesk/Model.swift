@@ -19,7 +19,13 @@ import ArchiveCore
     @Published var showCreate = false
     @Published var inputs: [URL] = []
     @Published var error: String?
-    @Published var recent: [URL] = []
+    @Published var recent: [URL] = (UserDefaults.standard.stringArray(forKey: "recentArchives") ?? []).map { URL(fileURLWithPath: $0) }
+    @Published var directory = ""
+    @Published var appearance = UserDefaults.standard.string(forKey: "appearance") ?? "system" {
+        didSet { UserDefaults.standard.set(appearance, forKey: "appearance") }
+    }
+    var colorScheme: ColorScheme? { appearance == "light" ? .light : appearance == "dark" ? .dark : nil }
+    private var openedCopies: [URL] = []
     @Published var rar = UserDefaults.standard.string(forKey: "rar") ?? "/opt/homebrew/bin/rar"
     @Published var unrar = UserDefaults.standard.string(forKey: "unrar") ?? "/opt/homebrew/bin/unrar"
     @Published var sevenZip = UserDefaults.standard.string(forKey: "sevenZipOverrideV2") ?? ""
@@ -27,10 +33,57 @@ import ArchiveCore
     var bundledSevenZip: String { Bundle.main.resourceURL?.appendingPathComponent("Tools/7zz").path ?? "" }
     var resolvedSevenZip: String { sevenZip.isEmpty ? bundledSevenZip : sevenZip }
     let runner = CLIRunner()
-    var visible: [ArchiveEntry] { entries.filter { filter.isEmpty || $0.path.localizedCaseInsensitiveContains(filter) } }
+    var visible: [ArchiveEntry] { ArchiveBrowser.children(entries, directory: directory, filter: filter) }
+    var selectedEntry: ArchiveEntry? { selection.count == 1 ? visible.first { selection.contains($0.id) } : nil }
+    func navigate(_ path: String) { directory = path; selection = []; filter = "" }
+    func goUp() { navigate((directory as NSString).deletingLastPathComponent) }
+    func clearRecent() {
+        recent = []
+        UserDefaults.standard.removeObject(forKey: "recentArchives")
+        NSDocumentController.shared.clearRecentDocuments(nil)
+        status = language.text("已清除历史记录，原文件未删除。")
+    }
+    func cleanOpenedCopies() {
+        for url in openedCopies { try? FileManager.default.removeItem(at: url) }
+        openedCopies = []
+    }
+    func activate(_ item: ArchiveEntry) {
+        guard !busy else { return }
+        if item.isDirectory { navigate(item.path); return }
+        guard item.category != "压缩包" else { error = language.text("暂不支持打开压缩包内的压缩包。"); return }
+        guard item.canOpenCopy else { error = language.text("此类型不能直接打开，请先解压后自行检查。"); return }
+        guard let archive, entries.allSatisfy({ ArchiveCommands.safePath($0.path) && !$0.isLink }),
+              let size = UInt64(item.size), size <= PreviewSafety.maximumBytes else {
+            error = language.text("仅支持打开不含链接的安全归档中的普通文件，单文件上限 512 MB。"); return
+        }
+        let notice = NSAlert()
+        notice.messageText = language.text("打开临时副本？")
+        notice.informativeText = language.text("将交给系统默认应用打开。只打开可信文件；编辑不会写回压缩包，退出本软件时临时副本会被清理。")
+        notice.addButton(withTitle: language.text("打开")); notice.addButton(withTitle: language.text("取消"))
+        guard notice.runModal() == .alertFirstButtonReturn else { return }
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("ArchiveDesk-open-" + UUID().uuidString, isDirectory: true)
+        do {
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+            let args = try ArchiveCommands.extract(session?.workingURL ?? archive, destination: root, selected: [item.path], password: password, using: .sevenZip)
+            openedCopies.append(root)
+            var retained = false
+            launch(language.text("准备打开文件"), executable: resolvedSevenZip, args: args, secret: password, completion: {
+                if !retained { try? FileManager.default.removeItem(at: root); self.openedCopies.removeAll { $0 == root } }
+            }) { _ in
+                do {
+                    let file = root.appendingPathComponent(item.path)
+                    try PreviewSafety.validate(file, inside: root)
+                    guard NSWorkspace.shared.open(file) else { throw ArchiveError.invalid("没有可打开此文件的默认应用。") }
+                    retained = true
+                    self.status = self.language.text("已打开临时副本，不会写回压缩包。")
+                } catch { self.error = self.language.message(error) }
+            }
+        } catch { try? FileManager.default.removeItem(at: root); self.error = language.message(error) }
+    }
     func savePaths() { for (key, value) in [("rar", rar), ("sevenZipOverrideV2", sevenZip)] { UserDefaults.standard.set(value, forKey: key) } }
     func executable(for url: URL) -> String { resolvedSevenZip }
     func chooseArchive() {
+        guard !busy else { return }
         let panel = NSOpenPanel(); panel.canChooseDirectories = false
         if panel.runModal() == .OK, let url = panel.url { open(url) }
     }
@@ -40,21 +93,24 @@ import ArchiveCore
         else { inputs = urls; showCreate = true }
     }
     func chooseInputs() {
+        guard !busy else { return }
         let panel = NSOpenPanel(); panel.allowsMultipleSelection = true; panel.canChooseDirectories = true
         if panel.runModal() == .OK { inputs = panel.urls; showCreate = true }
     }
     func open(_ url: URL) {
         guard !busy else { return }
-        session = nil; archive = url; entries = []; selection = []; password = ""; filter = ""
+        session = nil; archive = url; entries = []; selection = []; password = ""; filter = ""; directory = ""
         recent.removeAll { $0 == url }; recent.insert(url, at: 0); recent = Array(recent.prefix(10))
+        UserDefaults.standard.set(recent.map(\.path), forKey: "recentArchives")
         NSDocumentController.shared.noteNewRecentDocumentURL(url)
         browse()
     }
     func browse() {
+        guard !busy else { return }
         guard let archive else { return }
         do {
             let args = try ArchiveCommands.list(archive, password: password, using: .sevenZip)
-            entries = []; selection = []
+            entries = []; selection = []; directory = ""
             launch(language.text("读取目录"), executable: executable(for: archive), args: args, secret: password, preparing: archive) { result in
                 let parsed = result.archiveEntries(backend: .sevenZip)
                 guard Set(parsed.map(\.path)).count == parsed.count else { self.error = self.language.text("存在重复路径，无法可靠选择条目。"); return }
@@ -64,6 +120,7 @@ import ArchiveCore
         } catch { self.error = language.message(error) }
     }
     func extract(selected: Bool) {
+        guard !busy else { return }
         guard let archive, !entries.isEmpty else { return }
         guard entries.allSatisfy({ ArchiveCommands.safePath($0.path) && !$0.isLink }) else { error = language.text("压缩包包含不安全路径或链接。此原型拒绝解压，请使用受信任的独立工具检查。"); return }
         let chosen = selected ? entries.filter { item in
@@ -81,10 +138,12 @@ import ArchiveCore
         } catch { self.error = language.message(error) }
     }
     func test() {
+        guard !busy else { return }
         guard let archive else { return }
         do { launch(language.text("测试压缩包"), executable: executable(for: archive), args: try ArchiveCommands.test(session?.workingURL ?? archive, password: password, using: .sevenZip), secret: password) } catch { self.error = language.message(error) }
     }
     func recovery(_ command: String) {
+        guard !busy else { return }
         guard requireRAR() else { return }
         guard let archive, ArchiveCommands.backend(archive) == .rar else { return }
         let alert = NSAlert(); alert.messageText = command.hasPrefix("rr") ? language.text("为原压缩包添加 3% 恢复记录？") : language.text("在压缩包旁创建 10% 恢复卷？")
@@ -118,11 +177,11 @@ import ArchiveCore
         if alert.runModal() == .alertFirstButtonReturn { NSWorkspace.shared.open(URL(string: "https://www.rarlab.com/download.htm")!) }
         return false
     }
-    func launch(_ title: String, executable: String, args: [String], directory: URL? = nil, secret: String = "", preparing: URL? = nil, success: @escaping (CLIResult) -> Void = { _ in }) {
+    func launch(_ title: String, executable: String, args: [String], directory: URL? = nil, secret: String = "", preparing: URL? = nil, completion: @escaping () -> Void = {}, success: @escaping (CLIResult) -> Void = { _ in }) {
         guard !busy else { return }
         busy = true; progress = nil; stdout = ""; stderr = ""; status = title
         Task {
-            defer { busy = false; progress = nil }
+            defer { busy = false; progress = nil; completion() }
             do {
                 var actualArgs = args
                 if let preparing {
