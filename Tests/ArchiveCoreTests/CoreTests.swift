@@ -2,6 +2,51 @@ import XCTest
 @testable import ArchiveCore
 
 final class CoreTests: XCTestCase {
+    func testVirtualDirectoryNavigationAndTypes() {
+        func item(_ path: String, folder: Bool = false) -> ArchiveEntry {
+            ArchiveEntry(path: path, size: "20", modified: "", isDirectory: folder, isLink: false)
+        }
+        let entries = [item("Photos/trip/IMG.JPG"), item("Photos/movie.MP4"), item("readme.txt"), item("inside.ZIP"), item("empty", folder: true)]
+        let root = ArchiveBrowser.children(entries, directory: "")
+        XCTAssertEqual(Set(root.map(\.path)), ["Photos", "readme.txt", "inside.ZIP", "empty"])
+        XCTAssertTrue(root.first!.isDirectory)
+        XCTAssertEqual(Set(ArchiveBrowser.children(entries, directory: "Photos").map(\.path)), ["Photos/trip", "Photos/movie.MP4"])
+        XCTAssertEqual(ArchiveBrowser.children(entries, directory: "Photos", filter: "img").first?.path, "Photos/trip/IMG.JPG")
+        XCTAssertTrue(ArchiveBrowser.children(entries, directory: "Photo").isEmpty)
+        XCTAssertEqual(item("IMG.JPG").category, "图片")
+        XCTAssertEqual(item("movie.MP4").category, "视频")
+        XCTAssertFalse(item("inside.ZIP").canOpenCopy)
+        XCTAssertFalse(item("run.sh").canOpenCopy)
+        XCTAssertFalse(item("evil.app/Contents/readme.txt").canOpenCopy)
+        XCTAssertTrue(item("readme.txt").canOpenCopy)
+    }
+    func testPreviewSafetyAndSelectedExtraction() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appendingPathComponent("note.txt")
+        try Data("hello".utf8).write(to: file)
+        XCTAssertNoThrow(try PreviewSafety.validate(file, inside: root))
+        let link = root.appendingPathComponent("link.txt")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: file)
+        XCTAssertThrowsError(try PreviewSafety.validate(link, inside: root))
+        let disguised = root.appendingPathComponent("photo.png")
+        try Data([0x50,0x4b,0x03,0x04]).write(to: disguised)
+        XCTAssertThrowsError(try PreviewSafety.validate(disguised, inside: root))
+        try Data([0x23,0x21,0x2f,0x62]).write(to: disguised)
+        XCTAssertThrowsError(try PreviewSafety.validate(disguised, inside: root))
+        XCTAssertThrowsError(try PreviewSafety.validate(file, inside: root.appendingPathComponent("other")))
+        guard let engine = ProcessInfo.processInfo.environment["ARCHIVEDESK_TEST_7ZZ"] else { throw XCTSkip("Set ARCHIVEDESK_TEST_7ZZ") }
+        let runner = CLIRunner(), archive = root.appendingPathComponent("sample.zip")
+        let made = try await runner.run(executable: engine, arguments: ["a", archive.path, file.path]) { _, _ in }
+        XCTAssertEqual(made.status, 0)
+        let output = root.appendingPathComponent("preview")
+        try FileManager.default.createDirectory(at: output, withIntermediateDirectories: false)
+        let result = try await runner.run(executable: engine, arguments: ArchiveCommands.extract(archive, destination: output, selected: ["note.txt"], password: "", using: .sevenZip)) { _, _ in }
+        XCTAssertEqual(result.status, 0)
+        XCTAssertNoThrow(try PreviewSafety.validate(output.appendingPathComponent("note.txt"), inside: output))
+        XCTAssertEqual(try Data(contentsOf: output.appendingPathComponent("note.txt")), Data("hello".utf8))
+    }
     func testBroadFormatsWithBundledEngine() async throws {
         guard let path = ProcessInfo.processInfo.environment["ARCHIVEDESK_TEST_7ZZ"] else { throw XCTSkip("Set ARCHIVEDESK_TEST_7ZZ") }
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
