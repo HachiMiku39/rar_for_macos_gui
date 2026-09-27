@@ -4,7 +4,7 @@
 
 ## 安装
 
-在 [Releases](https://github.com/HachiMiku39/rar_for_macos_gui/releases) 下载最新版 `ArchiveDesk-0.5.0-universal.dmg`，打开后把 **ArchiveDesk** 拖到 **Applications**。
+在 [Releases](https://github.com/HachiMiku39/rar_for_macos_gui/releases) 下载最新版 `ArchiveDesk-0.5.1-universal.dmg`，打开后把 **ArchiveDesk** 拖到 **Applications**。
 
 这是未经 Developer ID 签名和公证的原型版本。如果 macOS 阻止打开，请优先用下方源码在 Xcode 中构建；不需要关闭系统安全保护。
 
@@ -42,7 +42,7 @@ xcodebuild -project ArchiveDesk.xcodeproj -scheme ArchiveDesk \
 
 设置 →“查看本地化示例”，然后导入 `fr-demo.json`，可体验部分法语翻译，缺失文字自动回退英语。
 
-制作完整语言包：复制 [en.json](Resources/Languages/en.json)，修改 `id/name/locale`，翻译 `strings` 的值，保留键和 `{0}` 等占位符。详见 [语言包接口说明](Resources/LocalizationDemo/README.md)。
+制作完整语言包：复制 [en-template.json](Resources/LocalizationDemo/en-template.json)，修改 `id/name/locale`，只翻译 `strings` 的值，保留英文原文键和 `{0}` 等占位符。0.5.1 使用 schema v2，明确 `sourceLanguage: "en"`；英语是源语言、缺失翻译的回退语言及全新安装默认语言。保留现有语言选择，并兼容旧中文键 v1 语言包；新版 Demo 需要 0.5.1+。详见 [语言包接口说明](Resources/LocalizationDemo/README.md)。
 
 ## English
 
