@@ -17,33 +17,33 @@ struct ContentView: View {
                     Image(systemName: "folder").foregroundStyle(.tint)
                     Text(model.archive?.path ?? "ArchiveDesk").lineLimit(1).truncationMode(.middle).textSelection(.enabled)
                     Spacer()
-                    Text(language.text("{0} 个条目", String(model.entries.count))).foregroundStyle(.secondary)
+                    Text(language.text("{0} items", String(model.entries.count))).foregroundStyle(.secondary)
                 }.padding(12)
                 if model.archive != nil { navigationBar }
                 if model.archive == nil {
                     ContentUnavailableView {
-                        Label(language.text("压缩文件，有条有理"), systemImage: "archivebox")
+                        Label(language.text("Archives, neatly organized"), systemImage: "archivebox")
                     } description: {
-                        Text(language.text("内置解压引擎，支持 RAR、ZIP、7z、TAR、ISO 等格式。\n拖入普通文件或文件夹，创建新的 RAR5。"))
+                        Text(language.text("Built-in extraction for RAR, ZIP, 7z, TAR, ISO and more.\nDrop files or folders to create RAR5, ZIP or 7z."))
                     } actions: {
-                        Button(language.text("打开压缩包…")) { model.chooseArchive() }.buttonStyle(.borderedProminent)
-                        SettingsLink { Text(language.text("引擎与高级设置")) }
+                        Button(language.text("Open Archive…")) { model.chooseArchive() }.buttonStyle(.borderedProminent)
+                        SettingsLink { Text(language.text("Engines & Settings")) }
                     }.frame(maxHeight: .infinity)
                 } else {
                     entryTable
                 }
                 Divider()
                 HStack {
-                    SecureField(language.text("压缩包密码（仅本次会话）"), text: $model.password).frame(maxWidth: 280)
-                    Button(language.text("重新读取")) { model.browse() }.disabled(model.archive == nil)
-                    Button(language.text("清除密码")) { model.password = "" }
+                    SecureField(language.text("Archive password (this session only)"), text: $model.password).frame(maxWidth: 280)
+                    Button(language.text("Reload")) { model.browse() }.disabled(model.archive == nil)
+                    Button(language.text("Clear Password")) { model.password = "" }
                     Spacer()
-                    Toggle(language.text("任务日志"), isOn: $showLog).toggleStyle(.checkbox)
+                    Toggle(language.text("Task Log"), isOn: $showLog).toggleStyle(.checkbox)
                 }.padding(10).archiveGlass().padding(.horizontal, 10).disabled(model.busy)
                 if showLog {
                     HSplitView {
-                        logPane(language.text("标准输出 stdout"), text: model.stdout)
-                        logPane(language.text("错误输出 stderr"), text: model.stderr)
+                        logPane(language.text("Standard output · stdout"), text: model.stdout)
+                        logPane(language.text("Error output · stderr"), text: model.stderr)
                     }.frame(height: 170)
                 }
                 statusBar
@@ -52,48 +52,48 @@ struct ContentView: View {
     }
     var body: some View {
         splitView.navigationTitle(model.archive?.lastPathComponent ?? "ArchiveDesk")
-        .searchable(text: $model.filter, prompt: language.text("筛选路径"))
+        .searchable(text: $model.filter, prompt: language.text("Filter paths"))
         .toolbar {
             ToolbarItemGroup {
-                Button { model.chooseArchive() } label: { Label(language.text("打开"), systemImage: "folder") }
-                Button { model.chooseInputs() } label: { Label(language.text("创建"), systemImage: "plus.square") }
-                Button { model.extract(selected: false) } label: { Label(language.text("解压全部"), systemImage: "tray.and.arrow.down") }.disabled(model.entries.isEmpty)
-                Button { model.extract(selected: true) } label: { Label(language.text("解压选中"), systemImage: "checklist") }.disabled(model.selection.isEmpty)
-                Button { model.test() } label: { Label(language.text("测试"), systemImage: "checkmark.shield") }.disabled(model.archive == nil)
+                Button { model.chooseArchive() } label: { Label(language.text("Open"), systemImage: "folder") }
+                Button { model.chooseInputs() } label: { Label(language.text("Create"), systemImage: "plus.square") }
+                Button { model.extract(selected: false) } label: { Label(language.text("Extract All"), systemImage: "tray.and.arrow.down") }.disabled(model.entries.isEmpty)
+                Button { model.extract(selected: true) } label: { Label(language.text("Extract Selected"), systemImage: "checklist") }.disabled(model.selection.isEmpty)
+                Button { model.test() } label: { Label(language.text("Test"), systemImage: "checkmark.shield") }.disabled(model.archive == nil)
                 Menu {
-                    Button(language.text("添加 3% Recovery Record…")) { model.recovery("rr3p") }
-                    Button(language.text("创建 10% Recovery Volumes…")) { model.recovery("rv10p") }
-                } label: { Label(language.text("恢复数据"), systemImage: "cross.case") }.disabled(model.archive?.pathExtension.lowercased() != "rar")
+                    Button(language.text("Add 3% Recovery Record…")) { model.recovery("rr3p") }
+                    Button(language.text("Create 10% Recovery Volumes…")) { model.recovery("rv10p") }
+                } label: { Label(language.text("Recovery Data"), systemImage: "cross.case") }.disabled(model.archive?.pathExtension.lowercased() != "rar")
             }
             ToolbarItem {
-                Button { model.archiveInfo() } label: { Label(language.text("压缩包信息"), systemImage: "info.circle") }.disabled(model.archive == nil || model.busy)
+                Button { model.archiveInfo() } label: { Label(language.text("Archive Information"), systemImage: "info.circle") }.disabled(model.archive == nil || model.busy)
             }
             ToolbarItem {
                 Menu {
-                    Picker(language.text("外观"), selection: $model.appearance) {
-                        Text(language.text("跟随系统")).tag("system")
-                        Text(language.text("日间模式")).tag("light")
-                        Text(language.text("夜间模式")).tag("dark")
+                    Picker(language.text("Appearance"), selection: $model.appearance) {
+                        Text(language.text("System Default")).tag("system")
+                        Text(language.text("Light")).tag("light")
+                        Text(language.text("Dark")).tag("dark")
                     }
-                } label: { Label(language.text("外观"), systemImage: "circle.lefthalf.filled") }
+                } label: { Label(language.text("Appearance"), systemImage: "circle.lefthalf.filled") }
             }
         }
         .dropDestination(for: URL.self) { urls, _ in guard !model.busy else { return false }; model.receive(urls); return true }
         .sheet(isPresented: $model.showCreate) { CreateView().environmentObject(model) }
-        .alert(language.text("操作未完成"), isPresented: Binding(get: { model.error != nil }, set: { if !$0 { model.error = nil } })) { Button(language.text("好")) { model.error = nil } } message: { Text(language.text(model.error ?? "")) }
+        .alert(language.text("Operation Unsuccessful"), isPresented: Binding(get: { model.error != nil }, set: { if !$0 { model.error = nil } })) { Button(language.text("OK")) { model.error = nil } } message: { Text(language.text(model.error ?? "")) }
         .frame(minWidth: 900, minHeight: 600)
     }
     private var navigationBar: some View {
         HStack(spacing: 12) {
             Button { model.goUp() } label: { Image(systemName: "chevron.up") }
-                .disabled(model.directory.isEmpty).help(language.text("上一级"))
-            Button { model.navigate("") } label: { Image(systemName: "house") }.help(language.text("根目录"))
-            Text(model.directory.isEmpty ? language.text("根目录") : model.directory)
+                .disabled(model.directory.isEmpty).help(language.text("Up One Level"))
+            Button { model.navigate("") } label: { Image(systemName: "house") }.help(language.text("Archive Root"))
+            Text(model.directory.isEmpty ? language.text("Archive Root") : model.directory)
                 .lineLimit(1).truncationMode(.middle).font(.callout)
             Spacer()
-            Text(language.text("{0} 个条目", String(model.visible.count))).font(.caption).foregroundStyle(.secondary)
-            Button(language.text("打开选中项")) { if let item = model.selectedEntry { model.activate(item) } }
-                .disabled(model.selectedEntry == nil || (model.selectedEntry?.category == "压缩包"))
+            Text(language.text("{0} items", String(model.visible.count))).font(.caption).foregroundStyle(.secondary)
+            Button(language.text("Open Selected Item")) { if let item = model.selectedEntry { model.activate(item) } }
+                .disabled(model.selectedEntry == nil || (model.selectedEntry?.category == "Archive"))
         }.padding(10).archiveGlass().padding(.horizontal, 10).padding(.bottom, 8).disabled(model.busy)
     }
     private var statusBar: some View {
@@ -104,31 +104,31 @@ struct ContentView: View {
             }
             Text(language.text(model.status)).font(.caption).lineLimit(2)
             Spacer()
-            if model.busy { Button(language.text("取消任务")) { model.runner.cancel() } }
+            if model.busy { Button(language.text("Cancel Task")) { model.runner.cancel() } }
         }.padding(10).background(.bar)
     }
     private var entryTable: some View {
         Table(model.visible, selection: $model.selection) {
-            TableColumn(language.text("名称 / 路径")) { (item: ArchiveEntry) in
+            TableColumn(language.text("Name / Path")) { (item: ArchiveEntry) in
                 HStack(spacing: 9) {
                     Image(systemName: item.symbol).symbolRenderingMode(.hierarchical)
-                        .foregroundStyle(item.isDirectory ? Color.accentColor : item.category == "图片" ? .pink : item.category == "视频" ? .purple : item.category == "音频" ? .orange : .secondary)
+                        .foregroundStyle(item.isDirectory ? Color.accentColor : item.category == "Image" ? .pink : item.category == "Video" ? .purple : item.category == "Audio" ? .orange : .secondary)
                         .frame(width: 22)
                     Text(model.filter.isEmpty ? item.name : item.path).lineLimit(1)
-                }.help(item.category == "压缩包" ? language.text("暂不支持打开压缩包内的压缩包。") : item.path)
+                }.help(item.category == "Archive" ? language.text("Opening nested archives is not supported yet.") : item.path)
             }.width(min: 220)
-            TableColumn(language.text("文件类型")) { (item: ArchiveEntry) in
+            TableColumn(language.text("Kind")) { (item: ArchiveEntry) in
                 Text(item.isDirectory || item.suffix.isEmpty ? language.text(item.category) : item.suffix.uppercased() + " · " + language.text(item.category))
                     .foregroundStyle(.secondary)
             }.width(min: 105, ideal: 140)
-            TableColumn(language.text("大小"), value: \ArchiveEntry.size).width(90)
-            TableColumn(language.text("修改时间"), value: \ArchiveEntry.modified).width(170)
+            TableColumn(language.text("Size"), value: \ArchiveEntry.size).width(90)
+            TableColumn(language.text("Modified"), value: \ArchiveEntry.modified).width(170)
         }
         .contextMenu(forSelectionType: String.self) { ids in
-            Button(language.text("打开选中项")) {
+            Button(language.text("Open Selected Item")) {
                 if let item = model.visible.first(where: { ids.contains($0.id) }) { model.activate(item) }
-            }.disabled(ids.count != 1 || model.busy || model.visible.contains { ids.contains($0.id) && $0.category == "压缩包" })
-            Button(language.text("解压选中项…")) { model.selection = ids; model.extract(selected: true) }.disabled(ids.isEmpty || model.busy)
+            }.disabled(ids.count != 1 || model.busy || model.visible.contains { ids.contains($0.id) && $0.category == "Archive" })
+            Button(language.text("Extract Selected…")) { model.selection = ids; model.extract(selected: true) }.disabled(ids.isEmpty || model.busy)
         } primaryAction: { ids in
             if ids.count == 1, let item = model.visible.first(where: { ids.contains($0.id) }) { model.activate(item) }
         }
@@ -139,20 +139,20 @@ struct ContentView: View {
     }
     private var sidebar: some View {
         List {
-            Section(language.text("工作区")) {
-                Label(language.text("压缩包浏览器"), systemImage: "archivebox")
-                Button(language.text("创建 RAR")) { model.chooseInputs() }
-                SettingsLink { Label(language.text("CLI 设置"), systemImage: "gearshape") }
+            Section(language.text("Workspace")) {
+                Label(language.text("Archive Browser"), systemImage: "archivebox")
+                Button(language.text("Create Archive")) { model.chooseInputs() }
+                SettingsLink { Label(language.text("Engine Settings"), systemImage: "gearshape") }
             }
-            Section(language.text("最近打开")) {
-                Button { model.clearRecent() } label: { Label(language.text("清除历史记录"), systemImage: "clock.badge.xmark") }
+            Section(language.text("Recent Archives")) {
+                Button { model.clearRecent() } label: { Label(language.text("Clear History"), systemImage: "clock.badge.xmark") }
                     .disabled(model.recent.isEmpty && NSDocumentController.shared.recentDocumentURLs.isEmpty)
                 ForEach(model.recent, id: \.self) { url in
                     Button(url.lastPathComponent) { model.open(url) }.help(url.path)
                 }
             }
-            Section(language.text("格式支持")) {
-                Text(language.text("内置 7-Zip 26.03"))
+            Section(language.text("Supported Formats")) {
+                Text(language.text("7-Zip 26.03 included"))
                 Text("RAR · ZIP · 7z · TAR · ISO")
                 Text("CAB · ARJ · LZH · GZ · UUE…")
             }.foregroundStyle(.secondary).font(.caption)
@@ -187,84 +187,84 @@ struct CreateView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack {
-                Label(language.text("创建压缩包"), systemImage: "archivebox.fill").font(.title2)
+                Label(language.text("Create Archive"), systemImage: "archivebox.fill").font(.title2)
                 Spacer()
-                Button(language.text("恢复默认")) { options = CreationOptions(); profileSaved = false }
-                Button(language.text("保存为默认配置")) {
+                Button(language.text("Reset Options")) { options = CreationOptions(); profileSaved = false }
+                Button(language.text("Save as Default Profile")) {
                     if (try? options.validatedPatterns()) != nil, let data = try? JSONEncoder().encode(options) {
                         UserDefaults.standard.set(data, forKey: "creationProfileV1"); profileSaved = true
                     }
                 }.disabled((try? options.validatedPatterns()) == nil)
             }
-            Text(language.text("{0} 个源项目 · 保留所选文件夹结构", String(model.inputs.count))).foregroundStyle(.secondary)
+            Text(language.text("{0} source items · Folder structure preserved", String(model.inputs.count))).foregroundStyle(.secondary)
             ScrollView { VStack(alignment: .leading) { ForEach(model.inputs, id: \.self) { Text($0.path).font(.caption).textSelection(.enabled) } }.frame(maxWidth: .infinity, alignment: .leading) }.frame(height: 50)
             Picker("", selection: $section) {
-                Text(language.text("常规")).tag(0)
-                Text(language.text("安全与恢复")).tag(1)
-                Text(language.text("文件")).tag(2)
-                Text(language.text("高级与时间")).tag(3)
+                Text(language.text("General")).tag(0)
+                Text(language.text("Security & Recovery")).tag(1)
+                Text(language.text("File")).tag(2)
+                Text(language.text("Advanced & Times")).tag(3)
             }.pickerStyle(.segmented)
             Group {
                 switch section {
                 case 0:
                 Form {
-                    Picker(language.text("压缩格式"), selection: $options.format) {
+                    Picker(language.text("Archive Format"), selection: $options.format) {
                         ForEach(CreationFormat.allCases, id: \.self) { Text($0.title).tag($0) }
                     }
-                    Picker(language.text("压缩等级"), selection: $options.level) {
-                        ForEach(Array(["仅存储", "最快", "快速", "标准", "较好", "最好"].enumerated()), id: \.offset) { i, key in Text(language.text(key)).tag(i) }
+                    Picker(language.text("Compression Level"), selection: $options.level) {
+                        ForEach(Array(["Store Only", "Fastest", "Fast", "Normal", "Good", "Best"].enumerated()), id: \.offset) { i, key in Text(language.text(key)).tag(i) }
                     }
-                    Toggle(language.text("固实压缩"), isOn: $options.solid).disabled(options.format == .zip)
-                    Picker(language.text("RAR 字典大小"), selection: $options.dictionaryMB) {
+                    Toggle(language.text("Solid Archive"), isOn: $options.solid).disabled(options.format == .zip)
+                    Picker(language.text("RAR Dictionary Size"), selection: $options.dictionaryMB) {
                         ForEach([4,8,16,32,64,128,256], id: \.self) { Text("\($0) MB").tag($0) }
                     }.disabled(options.format != .rar)
-                    TextField(language.text("分卷大小（MB，0 表示不分卷）"), text: $volume)
-                    Toggle(language.text("压缩后测试"), isOn: $options.testAfter)
-                    Text(language.text("固实压缩可提高相似文件压缩率，但单文件提取可能更慢。分卷输出放入独立新文件夹。")).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    TextField(language.text("Volume size (MB; 0 = single archive)"), text: $volume)
+                    Toggle(language.text("Test After Archiving"), isOn: $options.testAfter)
+                    Text(language.text("Solid mode can improve compression of similar files, but single-file extraction may be slower. Volumes use a new separate folder.")).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 }
                 case 1:
                 Form {
-                    SecureField(language.text("密码（可选）"), text: $password)
-                    SecureField(language.text("确认密码"), text: $confirmation)
-                    Toggle(language.text("加密文件名"), isOn: $headers).disabled(password.isEmpty || options.format == .zip)
-                    Text(language.text("ZIP 使用 AES-256，但不能加密文件名，部分系统解压工具不支持此加密。RAR5 / 7z 支持文件名加密。")).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                    Picker(language.text("恢复记录"), selection: $recovery) {
-                        Text(language.text("无")).tag(0); Text("3%").tag(3); Text("5%").tag(5); Text("10%").tag(10)
+                    SecureField(language.text("Password (optional)"), text: $password)
+                    SecureField(language.text("Confirm password"), text: $confirmation)
+                    Toggle(language.text("Encrypt file names"), isOn: $headers).disabled(password.isEmpty || options.format == .zip)
+                    Text(language.text("ZIP uses AES-256 but cannot encrypt filenames; some system extractors do not support it. RAR5 / 7z support filename encryption.")).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    Picker(language.text("Recovery record"), selection: $recovery) {
+                        Text(language.text("None")).tag(0); Text("3%").tag(3); Text("5%").tag(5); Text("10%").tag(10)
                     }.disabled(options.format != .rar)
-                    Toggle(language.text("BLAKE2 文件校验和"), isOn: $options.blake2).disabled(options.format != .rar)
+                    Toggle(language.text("BLAKE2 File Checksums"), isOn: $options.blake2).disabled(options.format != .rar)
                 }
                 case 2:
                 VStack(alignment: .leading, spacing: 10) {
-                    Text(language.text("排除规则（每行一条）"))
+                    Text(language.text("Exclude Patterns (one per line)"))
                     TextEditor(text: $options.exclusions).font(.system(.body, design: .monospaced))
-                        .accessibilityLabel(language.text("排除规则（每行一条）")).border(.secondary.opacity(0.3))
-                    Text(language.text("示例：*.tmp 或 *.DS_Store；支持 * 和 ?，不接受绝对路径、.. 或 @ 列表文件。")).font(.caption).foregroundStyle(.secondary)
-                    Toggle(language.text("已压缩格式直接存储（RAR）"), isOn: $options.storeCompressed).disabled(options.format != .rar)
+                        .accessibilityLabel(language.text("Exclude Patterns (one per line)")).border(.secondary.opacity(0.3))
+                    Text(language.text("Examples: *.tmp or *.DS_Store. Supports * and ?. No absolute paths, .. or @ list files.")).font(.caption).foregroundStyle(.secondary)
+                    Toggle(language.text("Store Already-compressed Types (RAR)"), isOn: $options.storeCompressed).disabled(options.format != .rar)
                 }.padding(18)
                 default:
                 Form {
-                    Picker(language.text("线程上限"), selection: $options.threads) {
-                        Text(language.text("自动")).tag(0)
+                    Picker(language.text("Thread Limit"), selection: $options.threads) {
+                        Text(language.text("Automatic")).tag(0)
                         ForEach([1,2,4,8,16,32,64], id: \.self) { Text(String($0)).tag($0) }
                     }
-                    Picker(language.text("快速打开信息（RAR）"), selection: $options.quickOpen) {
-                        Text(language.text("自动")).tag(0); Text(language.text("不添加")).tag(1); Text(language.text("全部添加")).tag(2)
+                    Picker(language.text("Quick Open Information (RAR)"), selection: $options.quickOpen) {
+                        Text(language.text("Automatic")).tag(0); Text(language.text("Do Not Add")).tag(1); Text(language.text("All Files")).tag(2)
                     }.disabled(options.format != .rar)
-                    Section(language.text("RAR 时间选项")) {
-                        Toggle(language.text("保存修改时间"), isOn: $options.modifiedTime)
-                        Toggle(language.text("保存访问时间"), isOn: $options.accessTime)
-                        Toggle(language.text("高精度时间"), isOn: $options.highPrecision)
+                    Section(language.text("RAR File Times")) {
+                        Toggle(language.text("Store Modification Time"), isOn: $options.modifiedTime)
+                        Toggle(language.text("Store Access Time"), isOn: $options.accessTime)
+                        Toggle(language.text("High-precision Times"), isOn: $options.highPrecision)
                     }.disabled(options.format != .rar)
-                    Text(language.text("macOS 的 ctime 是状态变更时间，不等同于创建时间，因此不提供 Windows 创建时间开关。ZIP / 7z 使用引擎默认时间策略。")).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    Text(language.text("On macOS, ctime means status-change time, not creation time. The Windows creation-time switch is omitted. ZIP / 7z use engine defaults.")).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 }
                 }
             }.formStyle(.grouped).frame(width: 612, height: 340)
-            Text(language.text(profileSaved ? "已保存配置（不含密码、源路径、分卷大小和恢复比例）。" : "密码仅在内存中使用；只创建新包，不覆盖旧包、不删除源文件。"))
+            Text(language.text(profileSaved ? "Profile saved (without passwords, source paths, volume size or recovery ratio)." : "Passwords stay in memory. Creates new archives only; never replaces archives or deletes source files."))
                 .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             HStack {
                 Spacer()
-                Button(language.text("取消")) { dismiss() }
-                Button(language.text("选择保存位置…")) {
+                Button(language.text("Cancel")) { dismiss() }
+                Button(language.text("Choose Save Location…")) {
                     model.create(password: password, headers: headers, volume: Int(volume) ?? -1, recovery: options.format == .rar ? recovery : 0, options: options)
                 }.buttonStyle(.borderedProminent)
                     .disabled(password != confirmation || !(0...1_000_000).contains(Int(volume) ?? -1) || model.inputs.isEmpty || (try? options.validatedPatterns()) == nil)
@@ -279,48 +279,48 @@ struct SettingsView: View {
     @EnvironmentObject var language: AppLanguage
     var body: some View {
         Form {
-            Picker(language.text("外观"), selection: $model.appearance) {
-                Text(language.text("跟随系统")).tag("system")
-                Text(language.text("日间模式")).tag("light")
-                Text(language.text("夜间模式")).tag("dark")
+            Picker(language.text("Appearance"), selection: $model.appearance) {
+                Text(language.text("System Default")).tag("system")
+                Text(language.text("Light")).tag("light")
+                Text(language.text("Dark")).tag("dark")
             }
-            Picker(language.text("语言"), selection: $language.selected) {
-                Text(language.text("跟随系统")).tag("system")
+            Picker(language.text("Language"), selection: $language.selected) {
+                Text(language.text("System Default")).tag("system")
                 ForEach(language.packs) { pack in Text(pack.name).tag(pack.id) }
             }
             HStack {
-                Button(language.text("导入语言包…")) { language.importPack() }
-                Button(language.text("查看本地化示例")) { language.showDemo() }
+                Button(language.text("Import Language Pack…")) { language.importPack() }
+                Button(language.text("Localization Demo")) { language.showDemo() }
             }
-            Text(language.text("语言包只能包含文字；缺失条目会回退到英语。系统文件对话框与 CLI 原始日志可能遵循系统或工具语言。")).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            Text(language.text("Language packs contain text only; missing entries fall back to English. System dialogs and raw CLI logs may use the system or tool language.")).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             Divider()
-            Text(language.text("命令行工具")).font(.title2)
-            Text(language.text("已内置 7-Zip，浏览、解压和测试无需安装。RAR 创建与恢复数据仍需单独配置获得许可的 RARLAB 工具。")).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            Text(language.text("Archive Engines")).font(.title2)
+            Text(language.text("7-Zip is included for browsing, extraction and testing. RAR creation and recovery require a separately licensed RARLAB tool.")).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             HStack {
-                Text(model.sevenZip.isEmpty ? language.text("正在使用内置解压引擎") : language.text("正在使用自定义解压引擎"))
-                Button(language.text("检测解压引擎")) { model.check(model.resolvedSevenZip) }
-                Button(language.text("恢复内置")) { model.sevenZip = ""; model.savePaths() }
+                Text(model.sevenZip.isEmpty ? language.text("Using the built-in extraction engine") : language.text("Using a custom extraction engine"))
+                Button(language.text("Check Engine")) { model.check(model.resolvedSevenZip) }
+                Button(language.text("Use Built-in")) { model.sevenZip = ""; model.savePaths() }
             }
-            pathRow(language.text("RAR（创建及恢复数据）"), path: $model.rar)
+            pathRow(language.text("RAR (creation and recovery)"), path: $model.rar)
             HStack {
-                Link(language.text("下载 RAR for macOS…"), destination: URL(string: "https://www.rarlab.com/download.htm")!)
-                Link(language.text("RAR 使用许可"), destination: URL(string: "https://www.rarlab.com/license.htm")!)
+                Link(language.text("Download RAR for macOS…"), destination: URL(string: "https://www.rarlab.com/download.htm")!)
+                Link(language.text("RAR License"), destination: URL(string: "https://www.rarlab.com/license.htm")!)
             }
-            Text(language.text("下载页面请选择 macOS ARM（Apple Silicon）或 x64（Intel）。解包后在上方选择 rar 文件。")).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-            pathRow(language.text("可选：自定义 7zz 路径（留空使用内置）"), path: $model.sevenZip)
-            Button(language.text("第三方许可与源码")) { if let url = Bundle.main.resourceURL?.appendingPathComponent("ThirdParty") { NSWorkspace.shared.open(url) } }
+            Text(language.text("Choose macOS ARM (Apple Silicon) or x64 (Intel) on the download page. Unpack it, then select the rar executable above.")).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            pathRow(language.text("Optional custom 7zz path (blank = built-in)"), path: $model.sevenZip)
+            Button(language.text("Third-party Licenses & Source")) { if let url = Bundle.main.resourceURL?.appendingPathComponent("ThirdParty") { NSWorkspace.shared.open(url) } }
             Text(language.text(model.status)).font(.caption)
-            Link(language.text("RARLAB 官方下载与许可"), destination: URL(string: "https://www.rarlab.com/download.htm")!)
+            Link(language.text("RARLAB Downloads & License"), destination: URL(string: "https://www.rarlab.com/download.htm")!)
         }.padding(24).frame(width: 700).disabled(model.busy).onDisappear { model.savePaths() }
-        .alert(language.text("操作未完成"), isPresented: Binding(get: { language.importError != nil }, set: { if !$0 { language.importError = nil } })) { Button("OK") { language.importError = nil } } message: { Text(language.importError ?? "") }
+        .alert(language.text("Operation Unsuccessful"), isPresented: Binding(get: { language.importError != nil }, set: { if !$0 { language.importError = nil } })) { Button("OK") { language.importError = nil } } message: { Text(language.importError ?? "") }
     }
     func pathRow(_ title: String, path: Binding<String>) -> some View {
         VStack(alignment: .leading) {
             Text(title)
             HStack {
-                TextField(language.text("绝对路径"), text: path).textFieldStyle(.roundedBorder)
-                Button(language.text("选择…")) { let p = NSOpenPanel(); p.canChooseDirectories = false; if p.runModal() == .OK, let url = p.url { path.wrappedValue = url.path; model.savePaths() } }
-                Button(language.text("检测")) { model.check(path.wrappedValue) }
+                TextField(language.text("Absolute path"), text: path).textFieldStyle(.roundedBorder)
+                Button(language.text("Choose…")) { let p = NSOpenPanel(); p.canChooseDirectories = false; if p.runModal() == .OK, let url = p.url { path.wrappedValue = url.path; model.savePaths() } }
+                Button(language.text("Check")) { model.check(path.wrappedValue) }
                 Image(systemName: FileManager.default.isExecutableFile(atPath: path.wrappedValue) ? "checkmark.circle.fill" : "exclamationmark.circle").foregroundStyle(FileManager.default.isExecutableFile(atPath: path.wrappedValue) ? .green : .orange)
             }
         }

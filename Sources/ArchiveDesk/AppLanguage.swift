@@ -12,6 +12,7 @@ import ArchiveCore
     @Published var importError: String?
     private var builtins: Set<String> = []
     private var english: LanguagePack?
+    private var legacyKeys: [String: String] = [:]
     private var packDirectory: URL {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("ArchiveDesk/LanguagePacks", isDirectory: true)
     }
@@ -25,8 +26,11 @@ import ArchiveCore
     }
     var locale: Locale { Locale(identifier: active?.locale ?? "en") }
     init() {
-        selected = UserDefaults.standard.string(forKey: "languageID") ?? "system"
+        selected = UserDefaults.standard.string(forKey: "languageID") ?? "en"
         let directory = Bundle.main.resourceURL?.appendingPathComponent("Languages")
+        if let url = directory?.appendingPathComponent("Legacy/v1-keys.json"), let data = try? Data(contentsOf: url) {
+            legacyKeys = (try? JSONDecoder().decode([String: String].self, from: data)) ?? [:]
+        }
         if let directory, let urls = try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil) {
             packs = urls.filter { $0.pathExtension == "json" }.compactMap { try? LanguagePack.decode(Data(contentsOf: $0)) }.sorted { $0.id < $1.id }
         }
@@ -34,7 +38,7 @@ import ArchiveCore
         builtins = Set(packs.map(\.id))
         if let urls = try? FileManager.default.contentsOfDirectory(at: packDirectory, includingPropertiesForKeys: nil) {
             for url in urls where url.pathExtension == "json" {
-                if let pack = try? LanguagePack.decode(Data(contentsOf: url), reference: english), !builtins.contains(pack.id), !packs.contains(where: { $0.id == pack.id }) { packs.append(pack) }
+                if let pack = try? LanguagePack.decode(Data(contentsOf: url), reference: english, legacyKeys: legacyKeys), !builtins.contains(pack.id), !packs.contains(where: { $0.id == pack.id }) { packs.append(pack) }
             }
         }
     }
@@ -53,14 +57,15 @@ import ArchiveCore
             let size = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
             guard size <= 1_048_576 else { throw PackError.invalid("Language pack exceeds 1 MB.") }
             let data = try Data(contentsOf: url)
-            let pack = try LanguagePack.decode(data, reference: english)
+            let pack = try LanguagePack.decode(data, reference: english, legacyKeys: legacyKeys)
             guard !builtins.contains(pack.id) else { throw PackError.invalid("Built-in language IDs cannot be replaced. Use a new ID.") }
             if packs.contains(where: { $0.id == pack.id }) {
-                let alert = NSAlert(); alert.messageText = text("替换已有语言包？"); alert.addButton(withTitle: text("替换")); alert.addButton(withTitle: text("取消"))
+                let alert = NSAlert(); alert.messageText = text("Replace this language pack?"); alert.addButton(withTitle: text("Replace")); alert.addButton(withTitle: text("Cancel"))
                 guard alert.runModal() == .alertFirstButtonReturn else { return }
             }
             try FileManager.default.createDirectory(at: packDirectory, withIntermediateDirectories: true)
-            try data.write(to: packDirectory.appendingPathComponent(pack.id + ".json"), options: .atomic)
+            let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+            try encoder.encode(pack).write(to: packDirectory.appendingPathComponent(pack.id + ".json"), options: .atomic)
             packs.removeAll { $0.id == pack.id }; packs.append(pack); selected = pack.id
         } catch { importError = error.localizedDescription }
     }

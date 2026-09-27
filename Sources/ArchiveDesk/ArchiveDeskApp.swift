@@ -16,8 +16,8 @@ import AppKit
         .defaultSize(width: 1080, height: 740)
         .commands {
             CommandGroup(replacing: .newItem) {
-                Button(language.text("打开压缩包…")) { model.chooseArchive() }.keyboardShortcut("o").disabled(model.busy)
-                Button(language.text("创建 RAR…")) { model.chooseInputs() }.keyboardShortcut("n").disabled(model.busy)
+                Button(language.text("Open Archive…")) { model.chooseArchive() }.keyboardShortcut("o").disabled(model.busy)
+                Button(language.text("Create Archive…")) { model.chooseInputs() }.keyboardShortcut("n").disabled(model.busy)
             }
         }
         Settings { SettingsView().environmentObject(model).environmentObject(language).environment(\.locale, language.locale).preferredColorScheme(model.colorScheme) }
