@@ -4,7 +4,7 @@
 
 ## 安装
 
-在 [Releases](https://github.com/HachiMiku39/rar_for_macos_gui/releases) 下载最新版 `ArchiveDesk-0.3.0-universal.dmg`，打开后把 **ArchiveDesk** 拖到 **Applications**。
+在 [Releases](https://github.com/HachiMiku39/rar_for_macos_gui/releases) 下载最新版 `ArchiveDesk-0.4.0-universal.dmg`，打开后把 **ArchiveDesk** 拖到 **Applications**。
 
 这是未经 Developer ID 签名和公证的原型版本。如果 macOS 阻止打开，请优先用下方源码在 Xcode 中构建；不需要关闭系统安全保护。
 
@@ -14,12 +14,16 @@
 - 支持密码、多选解压、拖放、Finder“打开方式”、任务日志和取消。
 - RAR5 创建、文件名加密、分卷与恢复数据：需另行安装 RARLAB 工具。
 - 简体中文 / English / 日本語，可在设置中即时切换；支持导入 JSON 语言包。
+- 文件类型列与彩色分类图标；双击文件夹进入、上一级/根目录导航，搜索当前目录及子目录。
+- 双击图片、视频、音频、PDF、文本或办公文档，以临时副本交给默认应用打开（需确认，单文件上限 512 MB）。不支持嵌套压缩包、可执行程序和脚本；编辑不会写回原包，退出时清理临时副本。异常退出可能留下系统临时文件，不应视为安全擦除。
+- 一键清除最近记录（侧栏与 macOS 最近文稿），不删除原文件。
+- macOS 26/27 原生 Liquid Glass 导航和操作区；日间、夜间或跟随系统，macOS 14/15 使用材质背景降级。
 
 **RAR 下载：** 设置 →“下载 RAR for macOS”，或访问 [RARLAB 官网](https://www.rarlab.com/download.htm)。选择 ARM（Apple Silicon）或 x64（Intel），解包后在设置中选择 `rar` 文件。RAR 创建器没有捆绑，使用与分发须遵守 [RARLAB 许可](https://www.rarlab.com/license.htm)。
 
 ## 从源码构建
 
-用 Xcode 15+ 打开 `ArchiveDesk.xcodeproj`，选择 **ArchiveDesk → My Mac**，运行。内置引擎、语言文件和许可会自动打包。
+用 Xcode 26+（推荐 Xcode 27）打开 `ArchiveDesk.xcodeproj`，选择 **ArchiveDesk → My Mac**，运行。内置引擎、语言文件和许可会自动打包。
 
 ```sh
 xcodebuild -project ArchiveDesk.xcodeproj -scheme ArchiveDesk \
