@@ -18,9 +18,9 @@ public final class ArchiveSession {
                 let handle = try FileHandle(forReadingFrom: source)
                 let header = String(decoding: try handle.read(upToCount: 8192) ?? Data(), as: UTF8.self)
                 try handle.close()
-                guard let line = header.components(separatedBy: .newlines).first(where: { $0.hasPrefix("begin ") || $0.hasPrefix("begin-base64 ") }) else { throw ArchiveError.invalid("找不到 UUE 文件头。") }
+                guard let line = header.components(separatedBy: .newlines).first(where: { $0.hasPrefix("begin ") || $0.hasPrefix("begin-base64 ") }) else { throw ArchiveError.invalid("UUE header not found.") }
                 let parts = line.split(separator: " ", maxSplits: 2)
-                guard parts.count == 3, ArchiveCommands.safePath(String(parts[2])), !parts[2].contains("/"), !parts[2].contains("\\") else { throw ArchiveError.invalid("UUE 内的文件名不安全。") }
+                guard parts.count == 3, ArchiveCommands.safePath(String(parts[2])), !parts[2].contains("/"), !parts[2].contains("\\") else { throw ArchiveError.invalid("Unsafe filename in UUE header.") }
                 let payload = root.appendingPathComponent("payload", isDirectory: true)
                 try FileManager.default.createDirectory(at: payload, withIntermediateDirectories: false)
                 let file = payload.appendingPathComponent(String(parts[2]))
@@ -34,7 +34,7 @@ public final class ArchiveSession {
         } catch { try? FileManager.default.removeItem(at: root); throw error }
     }
     private static func requireSuccess(_ result: CLIResult) throws {
-        if result.cancelled { throw ArchiveError.invalid("已取消预处理。") }
-        guard result.status == 0 else { throw ArchiveError.details("解码外层失败（{0}）：{1}", [String(result.status), result.stderr]) }
+        if result.cancelled { throw ArchiveError.invalid("Preprocessing cancelled.") }
+        guard result.status == 0 else { throw ArchiveError.details("Outer stream decoding failed ({0}): {1}", [String(result.status), result.stderr]) }
     }
 }

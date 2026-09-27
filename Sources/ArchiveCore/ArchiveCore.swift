@@ -48,7 +48,7 @@ public struct CreationOptions: Codable, Equatable {
         guard (0...5).contains(level), [4,8,16,32,64,128,256].contains(dictionaryMB),
               (0...64).contains(threads), (0...2).contains(quickOpen), patterns.count <= 50,
               patterns.allSatisfy({ $0.count <= 256 && ArchiveCommands.safePath($0) && !$0.hasPrefix("@") && !$0.hasPrefix("-") && !$0.contains("\t") }) else {
-            throw ArchiveError.invalid("压缩选项无效；排除规则每行一条，不得使用绝对路径、.. 或 @ 列表文件。")
+            throw ArchiveError.invalid("Invalid options. Use one exclude pattern per line, without absolute paths, .. or @ list files.")
         }
         return patterns
     }
@@ -94,32 +94,32 @@ public extension ArchiveEntry {
     var name: String { (path as NSString).lastPathComponent }
     var suffix: String { (name as NSString).pathExtension.lowercased() }
     var category: String {
-        if isDirectory { return "文件夹" }
-        if ArchiveCommands.extensions.contains(suffix) || ["ace", "lz", "lzip", "sit", "sitx", "tbz"].contains(suffix) { return "压缩包" }
-        if ["png", "jpg", "jpeg", "gif", "heic", "heif", "webp", "tif", "tiff", "bmp", "avif", "svg", "ico"].contains(suffix) { return "图片" }
-        if ["mp4", "mov", "m4v", "mkv", "avi", "webm", "mpeg", "mpg", "wmv"].contains(suffix) { return "视频" }
-        if ["mp3", "m4a", "aac", "wav", "flac", "aiff", "ogg", "opus"].contains(suffix) { return "音频" }
-        if suffix == "pdf" { return "PDF 文档" }
-        if ["txt", "md", "log", "csv", "json", "xml", "yaml", "yml", "rtf"].contains(suffix) { return "文本" }
-        if ["doc", "docx", "xls", "xlsx", "ppt", "pptx", "pages", "numbers", "key", "odt", "ods", "odp"].contains(suffix) { return "办公文档" }
-        return "文件"
+        if isDirectory { return "Folder" }
+        if ArchiveCommands.extensions.contains(suffix) || ["ace", "lz", "lzip", "sit", "sitx", "tbz"].contains(suffix) { return "Archive" }
+        if ["png", "jpg", "jpeg", "gif", "heic", "heif", "webp", "tif", "tiff", "bmp", "avif", "svg", "ico"].contains(suffix) { return "Image" }
+        if ["mp4", "mov", "m4v", "mkv", "avi", "webm", "mpeg", "mpg", "wmv"].contains(suffix) { return "Video" }
+        if ["mp3", "m4a", "aac", "wav", "flac", "aiff", "ogg", "opus"].contains(suffix) { return "Audio" }
+        if suffix == "pdf" { return "PDF document" }
+        if ["txt", "md", "log", "csv", "json", "xml", "yaml", "yml", "rtf"].contains(suffix) { return "Text" }
+        if ["doc", "docx", "xls", "xlsx", "ppt", "pptx", "pages", "numbers", "key", "odt", "ods", "odp"].contains(suffix) { return "Office document" }
+        return "File"
     }
     var symbol: String {
         switch category {
-        case "文件夹": return "folder.fill"
-        case "压缩包": return "archivebox.fill"
-        case "图片": return "photo.fill"
-        case "视频": return "film.fill"
-        case "音频": return "music.note"
-        case "PDF 文档": return "doc.richtext"
-        case "文本": return "doc.text"
-        case "办公文档": return "doc.on.doc"
+        case "Folder": return "folder.fill"
+        case "Archive": return "archivebox.fill"
+        case "Image": return "photo.fill"
+        case "Video": return "film.fill"
+        case "Audio": return "music.note"
+        case "PDF document": return "doc.richtext"
+        case "Text": return "doc.text"
+        case "Office document": return "doc.on.doc"
         default: return "doc"
         }
     }
     // Never launch scripts, executable files, app bundles, links or unknown types.
     var canOpenCopy: Bool {
-        !isDirectory && !isLink && ["图片", "视频", "音频", "PDF 文档", "文本", "办公文档"].contains(category)
+        !isDirectory && !isLink && ["Image", "Video", "Audio", "PDF document", "Text", "Office document"].contains(category)
             && ArchiveCommands.safePath(path)
             && !path.split(separator: "/").contains { ["app", "bundle", "framework"].contains(($0.description as NSString).pathExtension.lowercased()) }
     }
@@ -129,18 +129,18 @@ public enum PreviewSafety {
     public static let maximumBytes = 512 * 1024 * 1024
     public static func validate(_ file: URL, inside root: URL) throws {
         let resolved = file.resolvingSymlinksInPath().standardizedFileURL.path
-        guard resolved.hasPrefix(root.resolvingSymlinksInPath().standardizedFileURL.path + "/") else { throw ArchiveError.invalid("无法安全打开此文件。") }
+        guard resolved.hasPrefix(root.resolvingSymlinksInPath().standardizedFileURL.path + "/") else { throw ArchiveError.invalid("This file cannot be opened safely.") }
         let values = try file.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey])
-        guard values.isRegularFile == true, values.isSymbolicLink != true, (values.fileSize ?? Int.max) <= maximumBytes else { throw ArchiveError.invalid("无法安全打开此文件。") }
+        guard values.isRegularFile == true, values.isSymbolicLink != true, (values.fileSize ?? Int.max) <= maximumBytes else { throw ArchiveError.invalid("This file cannot be opened safely.") }
         let handle = try FileHandle(forReadingFrom: file)
         defer { try? handle.close() }
         let header = Array(try handle.read(upToCount: 512) ?? Data())
         let signatures: [[UInt8]] = [[0x52,0x61,0x72,0x21], [0x37,0x7a,0xbc,0xaf,0x27,0x1c], [0x1f,0x8b], [0xcf,0xfa,0xed,0xfe], [0xfe,0xed,0xfa,0xcf], [0xce,0xfa,0xed,0xfe], [0xca,0xfe,0xba,0xbe], [0x7f,0x45,0x4c,0x46], [0x4d,0x5a], [0x23,0x21]]
-        guard !signatures.contains(where: { header.starts(with: $0) }) else { throw ArchiveError.invalid("无法安全打开此文件。") }
+        guard !signatures.contains(where: { header.starts(with: $0) }) else { throw ArchiveError.invalid("This file cannot be opened safely.") }
         // Office Open XML documents are ZIP containers, but are not nested archive navigation.
         let office = ["docx", "xlsx", "pptx", "odt", "ods", "odp", "pages", "numbers", "key"].contains(file.pathExtension.lowercased())
         if !office && (header.starts(with: [0x50,0x4b,0x03,0x04]) || (header.count > 262 && String(bytes: header[257..<262], encoding: .ascii) == "ustar")) {
-            throw ArchiveError.invalid("暂不支持打开压缩包内的压缩包。")
+            throw ArchiveError.invalid("Opening nested archives is not supported yet.")
         }
     }
 }
@@ -153,14 +153,14 @@ public enum ArchiveCommands {
     }
     public static func backend(_ url: URL) -> Backend { url.pathExtension.lowercased() == "rar" ? .rar : .sevenZip }
     public static func passwordSwitch(_ password: String, headers: Bool = false) throws -> String {
-        guard !password.contains("\n"), !password.contains("\r"), !password.contains("\0"), password.unicodeScalars.count <= 127 else { throw ArchiveError.invalid("密码不能含换行、NUL，且不能超过 127 个 Unicode 码点。") }
+        guard !password.contains("\n"), !password.contains("\r"), !password.contains("\0"), password.unicodeScalars.count <= 127 else { throw ArchiveError.invalid("Passwords cannot contain newlines or NUL and must not exceed 127 Unicode code points.") }
         return password.isEmpty ? "-p-" : (headers ? "-hp" : "-p")
     }
     public static func safePath(_ path: String) -> Bool {
         !path.isEmpty && !path.hasPrefix("/") && !path.hasPrefix("\\") && !path.contains(":") && !path.contains("\0") && !path.contains("\n") && !path.contains("\r") && !path.replacingOccurrences(of: "\\", with: "/").split(separator: "/").contains("..")
     }
     public static func literalSelection(_ paths: [String]) throws {
-        guard paths.allSatisfy({ safePath($0) && !$0.contains("*") && !$0.contains("?") && !$0.hasPrefix("@") }) else { throw ArchiveError.invalid("此条目名称含 CLI 模式字符或不安全路径，无法可靠地按选中项解压。") }
+        guard paths.allSatisfy({ safePath($0) && !$0.contains("*") && !$0.contains("?") && !$0.hasPrefix("@") }) else { throw ArchiveError.invalid("This item contains wildcard characters or an unsafe path and cannot be safely extracted by selection.") }
     }
     public static func list(_ archive: URL, password: String, using engine: Backend? = nil) throws -> [String] {
         let p = try passwordSwitch(password)
@@ -177,15 +177,15 @@ public enum ArchiveCommands {
         return (engine ?? backend(archive)) == .rar ? ["t", "-cfg-", "-idc", p, "--", archive.path] : ["t", "-sccUTF-8", "--", archive.path]
     }
     public static func create(output: URL, inputs: [URL], password: String, headers: Bool, volumeMB: Int, recovery: Int, options: CreationOptions = CreationOptions()) throws -> [String] {
-        guard !inputs.isEmpty, (0...1_000_000).contains(volumeMB), (0...100).contains(recovery) else { throw ArchiveError.invalid("请选择文件；分卷范围 0–1000000 MB，恢复记录范围 0–100%。") }
-        guard !FileManager.default.fileExists(atPath: output.path), output.pathExtension.lowercased() == options.format.rawValue else { throw ArchiveError.invalid("请选择尚不存在且后缀与格式一致的压缩包文件名。") }
-        guard inputs.allSatisfy({ !$0.path.contains("\n") && !$0.path.contains("\r") && !$0.lastPathComponent.contains("*") && !$0.lastPathComponent.contains("?") }) else { throw ArchiveError.invalid("源名称含不支持的换行或通配符。") }
+        guard !inputs.isEmpty, (0...1_000_000).contains(volumeMB), (0...100).contains(recovery) else { throw ArchiveError.invalid("Select files; volume size must be 0–1000000 MB and recovery record 0–100%.") }
+        guard !FileManager.default.fileExists(atPath: output.path), output.pathExtension.lowercased() == options.format.rawValue else { throw ArchiveError.invalid("Choose a new filename with the correct extension for the selected format.") }
+        guard inputs.allSatisfy({ !$0.path.contains("\n") && !$0.path.contains("\r") && !$0.lastPathComponent.contains("*") && !$0.lastPathComponent.contains("?") }) else { throw ArchiveError.invalid("Source names contain unsupported newlines or wildcards.") }
         let parents = Set(inputs.map { $0.deletingLastPathComponent().path })
-        guard parents.count == 1 else { throw ArchiveError.invalid("此原型要求源文件位于同一文件夹；可直接选择它们的共同父文件夹。") }
+        guard parents.count == 1 else { throw ArchiveError.invalid("Source items must share one parent folder. You may select their common parent folder instead.") }
         let outputPath = output.resolvingSymlinksInPath().path
         for source in inputs {
             let path = source.resolvingSymlinksInPath().path
-            guard !outputPath.hasPrefix(path + "/") else { throw ArchiveError.invalid("输出压缩包不能保存在选中的源文件夹内。") }
+            guard !outputPath.hasPrefix(path + "/") else { throw ArchiveError.invalid("The output archive cannot be inside a selected source folder.") }
         }
         let patterns = try options.validatedPatterns()
         _ = try passwordSwitch(password)
@@ -253,7 +253,7 @@ public final class CLIRunner: @unchecked Sendable {
         DispatchQueue.global().asyncAfter(deadline: .now() + 2) { if child.isRunning { kill(child.processIdentifier, SIGKILL) } }
     }
     public func run(executable: String, arguments: [String], directory: URL? = nil, password: String = "", outputFile: URL? = nil, update: @escaping (String, String) -> Void) async throws -> CLIResult {
-        guard executable.hasPrefix("/"), FileManager.default.isExecutableFile(atPath: executable) else { throw ArchiveError.details("CLI 路径必须是可执行文件的绝对路径：{0}", [executable]) }
+        guard executable.hasPrefix("/"), FileManager.default.isExecutableFile(atPath: executable) else { throw ArchiveError.details("The engine path must be an absolute path to an executable: {0}", [executable]) }
         _ = try ArchiveCommands.passwordSwitch(password)
         lock.withLock { cancelled = false }
         return try await withCheckedThrowingContinuation { continuation in
@@ -266,7 +266,7 @@ public final class CLIRunner: @unchecked Sendable {
                 child.standardOutput = out; child.standardError = err; child.standardInput = input
                 var binaryOutput: FileHandle?
                 if let outputFile {
-                    guard FileManager.default.createFile(atPath: outputFile.path, contents: nil, attributes: [.posixPermissions: 0o600]), let handle = try? FileHandle(forWritingTo: outputFile) else { continuation.resume(throwing: ArchiveError.invalid("无法创建临时输出")); return }
+                    guard FileManager.default.createFile(atPath: outputFile.path, contents: nil, attributes: [.posixPermissions: 0o600]), let handle = try? FileHandle(forWritingTo: outputFile) else { continuation.resume(throwing: ArchiveError.invalid("Cannot create temporary output.")); return }
                     binaryOutput = handle; child.standardOutput = handle
                 }
                 defer { try? binaryOutput?.close() }

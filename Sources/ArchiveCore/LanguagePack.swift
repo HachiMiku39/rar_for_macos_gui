@@ -2,15 +2,26 @@ import Foundation
 
 public struct LanguagePack: Codable, Identifiable {
     public let schemaVersion: Int
+    public let sourceLanguage: String?
     public let id: String
     public let name: String
     public let locale: String
     public let strings: [String: String]
 
-    public static func decode(_ data: Data, reference: LanguagePack? = nil) throws -> LanguagePack {
+    public static func decode(_ data: Data, reference: LanguagePack? = nil, legacyKeys: [String: String] = [:]) throws -> LanguagePack {
         guard data.count <= 1_048_576 else { throw PackError.invalid("Language pack exceeds 1 MB.") }
-        let pack = try JSONDecoder().decode(LanguagePack.self, from: data)
-        guard pack.schemaVersion == 1, pack.id.range(of: "^[A-Za-z][A-Za-z0-9-]{1,39}$", options: .regularExpression) != nil,
+        var pack = try JSONDecoder().decode(LanguagePack.self, from: data)
+        if pack.schemaVersion == 1 {
+            guard reference != nil, !legacyKeys.isEmpty else { throw PackError.invalid("Legacy language pack requires the bundled migration dictionary. Use the English schema v2 template.") }
+            var migrated: [String: String] = [:]
+            for key in pack.strings.keys.sorted() {
+                guard let englishKey = legacyKeys[key] else { throw PackError.invalid("Unknown legacy translation key: \(key)") }
+                // Two old labels shared one English meaning. Prefer a stable first value.
+                if migrated[englishKey] == nil { migrated[englishKey] = pack.strings[key] }
+            }
+            pack = LanguagePack(schemaVersion: 2, sourceLanguage: "en", id: pack.id, name: pack.name, locale: pack.locale, strings: migrated)
+        }
+        guard pack.schemaVersion == 2, pack.sourceLanguage == "en", pack.id.range(of: "^[A-Za-z][A-Za-z0-9-]{1,39}$", options: .regularExpression) != nil,
               pack.locale.range(of: "^[A-Za-z]{2,8}([_-][A-Za-z0-9]{2,8})*$", options: .regularExpression) != nil,
               !pack.name.isEmpty, pack.name.count <= 80, !pack.name.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains),
               pack.strings.count <= 512 else { throw PackError.invalid("Invalid language pack metadata.") }
