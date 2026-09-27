@@ -66,6 +66,9 @@ struct ContentView: View {
                 } label: { Label(language.text("恢复数据"), systemImage: "cross.case") }.disabled(model.archive?.pathExtension.lowercased() != "rar")
             }
             ToolbarItem {
+                Button { model.archiveInfo() } label: { Label(language.text("压缩包信息"), systemImage: "info.circle") }.disabled(model.archive == nil || model.busy)
+            }
+            ToolbarItem {
                 Menu {
                     Picker(language.text("外观"), selection: $model.appearance) {
                         Text(language.text("跟随系统")).tag("system")
@@ -172,22 +175,102 @@ struct CreateView: View {
     @State private var headers = true
     @State private var volume = "0"
     @State private var recovery = 0
+    @State private var options = Self.savedProfile()
+    @State private var profileSaved = false
+    @State private var section = 0
+    private static func savedProfile() -> CreationOptions {
+        guard let data = UserDefaults.standard.data(forKey: "creationProfileV1"),
+              let value = try? JSONDecoder().decode(CreationOptions.self, from: data),
+              (try? value.validatedPatterns()) != nil else { return CreationOptions() }
+        return value
+    }
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            Label(language.text("创建 RAR5 压缩包"), systemImage: "archivebox.fill").font(.title2)
-            Text(language.text("{0} 个源项目 · 保留所选文件夹结构", String(model.inputs.count))).foregroundStyle(.secondary)
-            ScrollView { VStack(alignment: .leading) { ForEach(model.inputs, id: \.self) { Text($0.path).font(.caption).textSelection(.enabled) } } }.frame(height: 70)
-            Form {
-                SecureField(language.text("密码（可选）"), text: $password)
-                SecureField(language.text("确认密码"), text: $confirmation)
-                Toggle(language.text("加密文件名"), isOn: $headers).disabled(password.isEmpty)
-                TextField(language.text("分卷大小（MB，0 表示不分卷）"), text: $volume)
-                Picker(language.text("恢复记录"), selection: $recovery) { Text(language.text("无")).tag(0); Text("3%").tag(3); Text("5%").tag(5); Text("10%").tag(10) }
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                Label(language.text("创建压缩包"), systemImage: "archivebox.fill").font(.title2)
+                Spacer()
+                Button(language.text("恢复默认")) { options = CreationOptions(); profileSaved = false }
+                Button(language.text("保存为默认配置")) {
+                    if (try? options.validatedPatterns()) != nil, let data = try? JSONEncoder().encode(options) {
+                        UserDefaults.standard.set(data, forKey: "creationProfileV1"); profileSaved = true
+                    }
+                }.disabled((try? options.validatedPatterns()) == nil)
             }
-            Text(language.text("密码通过标准输入传递，不写入命令参数或设置。加密任务期间日志在结束后显示。新建仅支持 RAR5，不覆盖已有压缩包。")).font(.caption).foregroundStyle(.secondary)
-            HStack { Spacer(); Button(language.text("取消")) { dismiss() }; Button(language.text("选择保存位置…")) { model.create(password: password, headers: headers, volume: Int(volume) ?? -1, recovery: recovery) }.buttonStyle(.borderedProminent).disabled(password != confirmation || Int(volume) == nil || model.inputs.isEmpty) }
-        }.padding(24).frame(width: 540)
-        .onDisappear { password = ""; confirmation = "" }
+            Text(language.text("{0} 个源项目 · 保留所选文件夹结构", String(model.inputs.count))).foregroundStyle(.secondary)
+            ScrollView { VStack(alignment: .leading) { ForEach(model.inputs, id: \.self) { Text($0.path).font(.caption).textSelection(.enabled) } }.frame(maxWidth: .infinity, alignment: .leading) }.frame(height: 50)
+            Picker("", selection: $section) {
+                Text(language.text("常规")).tag(0)
+                Text(language.text("安全与恢复")).tag(1)
+                Text(language.text("文件")).tag(2)
+                Text(language.text("高级与时间")).tag(3)
+            }.pickerStyle(.segmented)
+            Group {
+                switch section {
+                case 0:
+                Form {
+                    Picker(language.text("压缩格式"), selection: $options.format) {
+                        ForEach(CreationFormat.allCases, id: \.self) { Text($0.title).tag($0) }
+                    }
+                    Picker(language.text("压缩等级"), selection: $options.level) {
+                        ForEach(Array(["仅存储", "最快", "快速", "标准", "较好", "最好"].enumerated()), id: \.offset) { i, key in Text(language.text(key)).tag(i) }
+                    }
+                    Toggle(language.text("固实压缩"), isOn: $options.solid).disabled(options.format == .zip)
+                    Picker(language.text("RAR 字典大小"), selection: $options.dictionaryMB) {
+                        ForEach([4,8,16,32,64,128,256], id: \.self) { Text("\($0) MB").tag($0) }
+                    }.disabled(options.format != .rar)
+                    TextField(language.text("分卷大小（MB，0 表示不分卷）"), text: $volume)
+                    Toggle(language.text("压缩后测试"), isOn: $options.testAfter)
+                    Text(language.text("固实压缩可提高相似文件压缩率，但单文件提取可能更慢。分卷输出放入独立新文件夹。")).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                }
+                case 1:
+                Form {
+                    SecureField(language.text("密码（可选）"), text: $password)
+                    SecureField(language.text("确认密码"), text: $confirmation)
+                    Toggle(language.text("加密文件名"), isOn: $headers).disabled(password.isEmpty || options.format == .zip)
+                    Text(language.text("ZIP 使用 AES-256，但不能加密文件名，部分系统解压工具不支持此加密。RAR5 / 7z 支持文件名加密。")).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    Picker(language.text("恢复记录"), selection: $recovery) {
+                        Text(language.text("无")).tag(0); Text("3%").tag(3); Text("5%").tag(5); Text("10%").tag(10)
+                    }.disabled(options.format != .rar)
+                    Toggle(language.text("BLAKE2 文件校验和"), isOn: $options.blake2).disabled(options.format != .rar)
+                }
+                case 2:
+                VStack(alignment: .leading, spacing: 10) {
+                    Text(language.text("排除规则（每行一条）"))
+                    TextEditor(text: $options.exclusions).font(.system(.body, design: .monospaced))
+                        .accessibilityLabel(language.text("排除规则（每行一条）")).border(.secondary.opacity(0.3))
+                    Text(language.text("示例：*.tmp 或 *.DS_Store；支持 * 和 ?，不接受绝对路径、.. 或 @ 列表文件。")).font(.caption).foregroundStyle(.secondary)
+                    Toggle(language.text("已压缩格式直接存储（RAR）"), isOn: $options.storeCompressed).disabled(options.format != .rar)
+                }.padding(18)
+                default:
+                Form {
+                    Picker(language.text("线程上限"), selection: $options.threads) {
+                        Text(language.text("自动")).tag(0)
+                        ForEach([1,2,4,8,16,32,64], id: \.self) { Text(String($0)).tag($0) }
+                    }
+                    Picker(language.text("快速打开信息（RAR）"), selection: $options.quickOpen) {
+                        Text(language.text("自动")).tag(0); Text(language.text("不添加")).tag(1); Text(language.text("全部添加")).tag(2)
+                    }.disabled(options.format != .rar)
+                    Section(language.text("RAR 时间选项")) {
+                        Toggle(language.text("保存修改时间"), isOn: $options.modifiedTime)
+                        Toggle(language.text("保存访问时间"), isOn: $options.accessTime)
+                        Toggle(language.text("高精度时间"), isOn: $options.highPrecision)
+                    }.disabled(options.format != .rar)
+                    Text(language.text("macOS 的 ctime 是状态变更时间，不等同于创建时间，因此不提供 Windows 创建时间开关。ZIP / 7z 使用引擎默认时间策略。")).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                }
+                }
+            }.formStyle(.grouped).frame(width: 612, height: 340)
+            Text(language.text(profileSaved ? "已保存配置（不含密码、源路径、分卷大小和恢复比例）。" : "密码仅在内存中使用；只创建新包，不覆盖旧包、不删除源文件。"))
+                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            HStack {
+                Spacer()
+                Button(language.text("取消")) { dismiss() }
+                Button(language.text("选择保存位置…")) {
+                    model.create(password: password, headers: headers, volume: Int(volume) ?? -1, recovery: options.format == .rar ? recovery : 0, options: options)
+                }.buttonStyle(.borderedProminent)
+                    .disabled(password != confirmation || !(0...1_000_000).contains(Int(volume) ?? -1) || model.inputs.isEmpty || (try? options.validatedPatterns()) == nil)
+            }
+        }.frame(width: 612).padding(24)
+            .onDisappear { password = ""; confirmation = "" }
     }
 }
 

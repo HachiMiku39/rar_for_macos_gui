@@ -151,21 +151,50 @@ import ArchiveCore
         guard alert.runModal() == .alertFirstButtonReturn else { return }
         do { launch(language.text("恢复数据"), executable: rar, args: [command, "-cfg-", try ArchiveCommands.passwordSwitch(password), "--", archive.path], secret: password) } catch { self.error = language.message(error) }
     }
-    func create(password secret: String, headers: Bool, volume: Int, recovery: Int) {
-        guard requireRAR() else { return }
-        let panel = NSSavePanel(); panel.nameFieldStringValue = "Archive.rar"; panel.title = language.text("创建新 RAR5 压缩包")
-        guard panel.runModal() == .OK, let output = panel.url else { return }
+    func create(password secret: String, headers: Bool, volume: Int, recovery: Int, options: CreationOptions) {
+        guard !busy else { return }
+        if options.format == .rar && !requireRAR() { return }
+        let panel = NSSavePanel(); panel.nameFieldStringValue = "Archive." + options.format.rawValue; panel.title = language.text("创建压缩包")
+        guard panel.runModal() == .OK, let selectedOutput = panel.url else { return }
+        var createdFolder: URL?
         do {
-            let args = try ArchiveCommands.create(output: output, inputs: inputs, password: secret, headers: headers, volumeMB: volume, recovery: recovery)
-            // Reserve a fresh folder for multi-volume output to avoid colliding with existing parts.
+            // Validate before creating any directory. Volumes always use a fresh folder.
+            _ = try ArchiveCommands.create(output: selectedOutput, inputs: inputs, password: secret, headers: headers, volumeMB: volume, recovery: recovery, options: options)
+            var output = selectedOutput
             if volume > 0 {
-                let stem = output.deletingPathExtension().lastPathComponent
-                let siblings = try FileManager.default.contentsOfDirectory(atPath: output.deletingLastPathComponent().path)
-                guard !siblings.contains(where: { $0.hasPrefix(stem + ".part") }) else { throw ArchiveError.invalid(language.text("目标目录中已有同名前缀的分卷，请换一个文件名。")) }
+                let folder = selectedOutput.deletingLastPathComponent().appendingPathComponent(selectedOutput.deletingPathExtension().lastPathComponent + "-parts-" + String(UUID().uuidString.prefix(8)))
+                try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
+                createdFolder = folder
+                output = folder.appendingPathComponent(selectedOutput.lastPathComponent)
             }
+            let args = try ArchiveCommands.create(output: output, inputs: inputs, password: secret, headers: headers, volumeMB: volume, recovery: recovery, options: options)
+            let engine = options.format == .rar ? rar : resolvedSevenZip
+            let firstVolume = volume > 0 ? URL(fileURLWithPath: output.path + ".001") : output
+            let verification = options.testAfter && options.format != .rar
+                ? try ArchiveCommands.test(firstVolume, password: secret, using: .sevenZip) : nil
             showCreate = false
-            launch(language.text("创建 RAR5"), executable: rar, args: args, directory: inputs.first?.deletingLastPathComponent(), secret: secret) { _ in NSWorkspace.shared.activateFileViewerSelecting([output.deletingLastPathComponent()]) }
-        } catch { self.error = language.message(error) }
+            launch(language.text("创建压缩包"), executable: engine, args: args, directory: inputs.first?.deletingLastPathComponent(), secret: secret, verification: verification) { _ in
+                NSWorkspace.shared.activateFileViewerSelecting([output.deletingLastPathComponent()])
+            }
+        } catch {
+            if let createdFolder { try? FileManager.default.removeItem(at: createdFolder) }
+            self.error = language.message(error)
+        }
+    }
+    func archiveInfo() {
+        guard let archive else { return }
+        let files = entries.filter { !$0.isDirectory }
+        let bytes = files.reduce(UInt64(0)) { total, item in
+            let sum = total.addingReportingOverflow(UInt64(item.size) ?? 0)
+            return sum.overflow ? UInt64.max : sum.partialValue
+        }
+        let alert = NSAlert()
+        alert.messageText = language.text("压缩包信息")
+        alert.informativeText = archive.lastPathComponent + "\n" +
+            language.text("文件：{0} · 文件夹：{1}", String(files.count), String(entries.filter(\.isDirectory).count)) + "\n" +
+            language.text("原始大小：{0} 字节", String(bytes)) + "\n" +
+            language.text("信息来自当前目录列表；并非完整的格式属性检测。")
+        alert.addButton(withTitle: language.text("好")); alert.runModal()
     }
     func check(_ path: String) { savePaths(); launch(language.text("检测 CLI"), executable: path, args: ["-?"]) }
     private func requireRAR() -> Bool {
@@ -177,7 +206,7 @@ import ArchiveCore
         if alert.runModal() == .alertFirstButtonReturn { NSWorkspace.shared.open(URL(string: "https://www.rarlab.com/download.htm")!) }
         return false
     }
-    func launch(_ title: String, executable: String, args: [String], directory: URL? = nil, secret: String = "", preparing: URL? = nil, completion: @escaping () -> Void = {}, success: @escaping (CLIResult) -> Void = { _ in }) {
+    func launch(_ title: String, executable: String, args: [String], directory: URL? = nil, secret: String = "", preparing: URL? = nil, verification: [String]? = nil, completion: @escaping () -> Void = {}, success: @escaping (CLIResult) -> Void = { _ in }) {
         guard !busy else { return }
         busy = true; progress = nil; stdout = ""; stderr = ""; status = title
         Task {
@@ -199,7 +228,19 @@ import ArchiveCore
                 }
                 stdout = String(result.stdout.suffix(200_000)); stderr = String(result.stderr.suffix(100_000))
                 if result.cancelled { status = language.text("已取消；可能留下不完整输出，请检查目标目录。") }
-                else if result.status == 0 { status = language.text("{0} · 完成", title); success(result) }
+                else if result.status == 0 {
+                    if let verification {
+                        status = language.text("压缩后测试")
+                        let checked = try await runner.run(executable: executable, arguments: verification, password: secret) { _, _ in }
+                        stdout += "\n--- Post-create test ---\n" + String(checked.stdout.suffix(100_000))
+                        stderr += "\n" + String(checked.stderr.suffix(100_000))
+                        guard !checked.cancelled, checked.status == 0 else {
+                            error = language.text("压缩包已生成，但后续测试未完成或失败，请检查日志。")
+                            status = language.text("压缩后测试失败"); return
+                        }
+                    }
+                    status = language.text("{0} · 完成", title); success(result)
+                }
                 else { status = language.text("{0} · 退出码 {1}", title, String(result.status)); error = language.text("CLI 退出码 {0}。请查看 stderr/stdout。密码错误时可输入密码后重新读取。", String(result.status)) }
             } catch { self.error = language.message(error); status = language.text("无法执行") }
         }
