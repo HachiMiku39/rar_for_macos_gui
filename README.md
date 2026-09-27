@@ -4,9 +4,15 @@
 
 ## 安装
 
-在 [Releases](https://github.com/HachiMiku39/rar_for_macos_gui/releases) 下载最新版 `ArchiveDesk-0.4.0-universal.dmg`，打开后把 **ArchiveDesk** 拖到 **Applications**。
+在 [Releases](https://github.com/HachiMiku39/rar_for_macos_gui/releases) 下载最新版 `ArchiveDesk-0.5.0-universal.dmg`，打开后把 **ArchiveDesk** 拖到 **Applications**。
 
 这是未经 Developer ID 签名和公证的原型版本。如果 macOS 阻止打开，请优先用下方源码在 Xcode 中构建；不需要关闭系统安全保护。
+
+## 0.5 新增
+
+创建窗口按常规、安全与恢复、文件、高级与时间分组。新增 ZIP/7z 创建、六档压缩等级、固实压缩、RAR 字典/BLAKE2/快速打开信息/时间设置、排除规则、线程上限和压缩后测试。可保存不含密码的默认配置。
+
+[WinRAR 功能取舍与对应表](docs/WINRAR-FEATURES.md)
 
 ## 功能
 
