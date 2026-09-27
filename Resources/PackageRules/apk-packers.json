@@ -1,0 +1,12 @@
+[
+  {
+    "name": "Jiagu-style loader (filename/class heuristic)",
+    "fileNames": ["libjiagu.so", "libjiagu_art.so", "libjiagu_a64.so"],
+    "applications": ["com.stub.StubApp"]
+  },
+  {
+    "name": "DexHelper-style loader (filename heuristic)",
+    "fileNames": ["libDexHelper.so", "libDexHelper-x86.so"],
+    "applications": []
+  }
+]
