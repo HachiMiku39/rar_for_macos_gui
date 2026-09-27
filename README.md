@@ -4,9 +4,18 @@
 
 ## 安装
 
-在 [Releases](https://github.com/HachiMiku39/rar_for_macos_gui/releases) 下载最新版 `ArchiveDesk-0.5.1-universal.dmg`，打开后把 **ArchiveDesk** 拖到 **Applications**。
+在 [Releases](https://github.com/HachiMiku39/rar_for_macos_gui/releases) 下载最新版 `ArchiveDesk-0.6.0-universal.dmg`，打开后把 **ArchiveDesk** 拖到 **Applications**。
 
 这是未经 Developer ID 签名和公证的原型版本。如果 macOS 阻止打开，请优先用下方源码在 Xcode 中构建；不需要关闭系统安全保护。
+
+## 0.6 新增
+
+- IPA／APK 结构识别、浏览、全部／选中解压；不执行包内程序，不解密或脱壳。
+- 按需后台检查：IPA Bundle 元数据、逐 Mach-O／架构的加密标记；APK 包名、版本、SDK、ABI、DEX 和有限加固特征提示。
+- 处理 APK 大小写冲突文件名，重命名导出并生成路径映射，避免 macOS 上静默漏文件。
+- 使用用户提供的新图标。新增文字继续支持中、英、日三语。
+
+检查与导出边界见 [IPA／APK 使用说明](docs/MOBILE-PACKAGES.md)。未检测到标记不等于已脱壳或无保护。
 
 ## 0.5 新增
 
