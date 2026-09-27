@@ -23,6 +23,49 @@ public enum ArchiveError: LocalizedError {
 
 public enum Backend { case rar, sevenZip }
 
+public enum CreationFormat: String, Codable, CaseIterable {
+    case rar, zip, sevenZip = "7z"
+    public var title: String { self == .rar ? "RAR5" : rawValue.uppercased() }
+}
+
+public struct CreationOptions: Codable, Equatable {
+    public var format: CreationFormat = .rar
+    public var level = 3
+    public var dictionaryMB = 32
+    public var solid = false
+    public var testAfter = true
+    public var threads = 0
+    public var blake2 = false
+    public var quickOpen = 0 // 0 automatic, 1 none, 2 all
+    public var storeCompressed = false
+    public var modifiedTime = true
+    public var accessTime = false
+    public var highPrecision = true
+    public var exclusions = ""
+    public init() {}
+    public func validatedPatterns() throws -> [String] {
+        let patterns = exclusions.components(separatedBy: .newlines).map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        guard (0...5).contains(level), [4,8,16,32,64,128,256].contains(dictionaryMB),
+              (0...64).contains(threads), (0...2).contains(quickOpen), patterns.count <= 50,
+              patterns.allSatisfy({ $0.count <= 256 && ArchiveCommands.safePath($0) && !$0.hasPrefix("@") && !$0.hasPrefix("-") && !$0.contains("\t") }) else {
+            throw ArchiveError.invalid("压缩选项无效；排除规则每行一条，不得使用绝对路径、.. 或 @ 列表文件。")
+        }
+        return patterns
+    }
+    public func rarSwitches() throws -> [String] {
+        let patterns = try validatedPatterns()
+        var result = ["-m\(level)", "-md\(dictionaryMB)m", solid ? "-s" : "-s-",
+                      blake2 ? "-htb" : "-htc", quickOpen == 1 ? "-qo-" : quickOpen == 2 ? "-qo+" : "-qo",
+                      modifiedTime ? (highPrecision ? "-tsm+" : "-tsm1") : "-tsm-",
+                      accessTime ? (highPrecision ? "-tsa+" : "-tsa1") : "-tsa-", "-tsc-"]
+        if threads > 0 { result.append("-mt\(threads)") }
+        if testAfter { result.append("-t") }
+        if storeCompressed { result.append("-ms") }
+        result += patterns.map { "-x" + $0 }
+        return result
+    }
+}
+
 /// A virtual directory tree; some archives omit explicit directory entries.
 public enum ArchiveBrowser {
     public static func children(_ entries: [ArchiveEntry], directory: String, filter: String = "") -> [ArchiveEntry] {
@@ -133,9 +176,9 @@ public enum ArchiveCommands {
         let p = try passwordSwitch(password)
         return (engine ?? backend(archive)) == .rar ? ["t", "-cfg-", "-idc", p, "--", archive.path] : ["t", "-sccUTF-8", "--", archive.path]
     }
-    public static func create(output: URL, inputs: [URL], password: String, headers: Bool, volumeMB: Int, recovery: Int) throws -> [String] {
+    public static func create(output: URL, inputs: [URL], password: String, headers: Bool, volumeMB: Int, recovery: Int, options: CreationOptions = CreationOptions()) throws -> [String] {
         guard !inputs.isEmpty, (0...1_000_000).contains(volumeMB), (0...100).contains(recovery) else { throw ArchiveError.invalid("请选择文件；分卷范围 0–1000000 MB，恢复记录范围 0–100%。") }
-        guard !FileManager.default.fileExists(atPath: output.path), output.pathExtension.lowercased() == "rar" else { throw ArchiveError.invalid("请选择尚不存在的 .rar 文件名。") }
+        guard !FileManager.default.fileExists(atPath: output.path), output.pathExtension.lowercased() == options.format.rawValue else { throw ArchiveError.invalid("请选择尚不存在且后缀与格式一致的压缩包文件名。") }
         guard inputs.allSatisfy({ !$0.path.contains("\n") && !$0.path.contains("\r") && !$0.lastPathComponent.contains("*") && !$0.lastPathComponent.contains("?") }) else { throw ArchiveError.invalid("源名称含不支持的换行或通配符。") }
         let parents = Set(inputs.map { $0.deletingLastPathComponent().path })
         guard parents.count == 1 else { throw ArchiveError.invalid("此原型要求源文件位于同一文件夹；可直接选择它们的共同父文件夹。") }
@@ -144,7 +187,22 @@ public enum ArchiveCommands {
             let path = source.resolvingSymlinksInPath().path
             guard !outputPath.hasPrefix(path + "/") else { throw ArchiveError.invalid("输出压缩包不能保存在选中的源文件夹内。") }
         }
-        var args = ["a", "-cfg-", "-ma5", "-r", "-idc", try passwordSwitch(password, headers: headers)]
+        let patterns = try options.validatedPatterns()
+        _ = try passwordSwitch(password)
+        if options.format != .rar {
+            var args = ["a", "-t" + options.format.rawValue, "-mx=\([0,1,3,5,7,9][options.level])", "-sccUTF-8"]
+            if !password.isEmpty {
+                args.append("-p")
+                if options.format == .zip { args.append("-mem=AES256") }
+                else if headers { args.append("-mhe=on") }
+            }
+            if options.format == .sevenZip { args.append(options.solid ? "-ms=on" : "-ms=off") }
+            if options.threads > 0 { args.append("-mmt=\(options.threads)") }
+            if volumeMB > 0 { args.append("-v\(volumeMB)m") }
+            args += patterns.map { "-xr!" + $0 }
+            return args + ["--", output.path] + inputs.map { "./" + $0.lastPathComponent }
+        }
+        var args = ["a", "-cfg-", "-ma5", "-r", "-idc", try passwordSwitch(password, headers: headers)] + (try options.rarSwitches())
         if volumeMB > 0 { args.append("-v\(volumeMB)m") }
         if recovery > 0 { args.append("-rr\(recovery)p") }
         return args + ["--", output.path] + inputs.map { "./" + $0.lastPathComponent }
