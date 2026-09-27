@@ -1,19 +1,45 @@
-# Language pack demo / 语言包示例 / 言語パックのサンプル
+# English-first language packs
 
-Open Settings → Import Language Pack and choose `fr-demo.json`. The partial French demo switches immediately; missing entries use English. Select English, 日本語, 简体中文 or System Default to return. No restart is needed.
+English is ArchiveDesk's source language and fallback language. New installations default to English; existing language choices are preserved. System Default remains available in Settings.
 
-设置 → 导入语言包，选择 `fr-demo.json`。演示只翻译部分法语文字，其余回退英语。可随时切回内置语言。
+## Start translating
 
-設定 → 言語パックを読み込む → `fr-demo.json` を選択。翻訳のない項目は英語になります。再起動は不要です。
+1. Copy `en-template.json` to a writable folder. It contains every current English source string.
+2. Change `id` (for example `fr-custom`), `name` (for example `Français`) and `locale` (for example `fr`). Do not use the built-in IDs `en`, `ja` or `zh-Hans`.
+3. Translate only the **values** inside `strings`. Keep the English keys unchanged. You may remove untranslated entries; they fall back to English.
+4. In ArchiveDesk 0.5.1 or later, open Settings → Import Language Pack and select your JSON file. The language switches immediately, without restarting.
 
-## Format
+`fr-demo.json` is a small English → French example, not a complete French translation. It intentionally leaves other entries in English. Select English, 日本語, 简体中文 or System Default to switch back.
 
-UTF-8 JSON fields: `schemaVersion: 1`, unique `id`, display `name`, BCP-47-style `locale`, and `strings` (key → translation). Copy the bundled `Languages/en.json` as a full template, change metadata, and translate only the values. Chinese source keys are stable identifiers; do not translate or rename them.
+## Schema v2
 
-Use exactly the same numbered placeholders (`{0}`, `{1}`) as the source key. Their order may change. Values are plain text, never executable code, HTML, shell commands or printf formats. Filenames substituted into a placeholder are not interpreted as more placeholders.
+```json
+{
+  "schemaVersion": 2,
+  "sourceLanguage": "en",
+  "id": "fr-custom",
+  "name": "Français",
+  "locale": "fr",
+  "strings": {
+    "Open": "Ouvrir",
+    "Cancel": "Annuler",
+    "{0} items": "{0} éléments"
+  }
+}
+```
 
-Limits: 1 MB per file, 512 entries, 8000 characters per key/value, 80 characters for name. Unknown keys, malformed metadata, control characters and placeholder mismatches are rejected. Built-in IDs cannot be overwritten. Existing custom IDs require replacement confirmation.
+Use UTF-8 JSON. `sourceLanguage` must be `en`; `locale` identifies the target language. No Chinese knowledge is required. English keys are exact, case-sensitive identifiers: preserve spaces, punctuation and numbered placeholders (`{0}`, `{1}`). Placeholder order may change, but each placeholder must appear the same number of times.
 
-Imported files are copied into `~/Library/Application Support/ArchiveDesk/LanguagePacks/`. Missing keys fall back to English. Remove a custom JSON file there and restart the app to remove it. Future releases may add keys; use the new English template when updating a pack. Older keys removed by a future schema may require a migration.
+Values are plain text, never executable code, HTML, shell commands or printf formats. Filenames substituted into placeholders are not interpreted as further placeholders. Limits: 1 MB per file, 512 entries, 8000 characters per key/value, 80 characters for name. Unknown keys, malformed metadata, control characters and placeholder mismatches are rejected. Existing custom IDs require confirmation before replacement.
 
-System-owned menus/file dialogs and raw CLI/OS error output may follow the macOS or tool language; all application-owned labels, actions and archive validation errors are translated. Technical language-pack validation errors currently use English so translators have a stable diagnostic.
+## Compatibility and storage
+
+ArchiveDesk 0.5.1+ reads old schema v1 packs using its bundled legacy-key map. Previously imported packs are converted in memory without modifying their files. Importing a v1 pack saves a normalized v2 copy. The legacy map is internal compatibility data, not a translation template. Schema v2 packs require ArchiveDesk 0.5.1+; version 0.5.0 and earlier cannot import them.
+
+Imported packs are stored in `~/Library/Application Support/ArchiveDesk/LanguagePacks/`. Remove a custom file there and restart to remove that pack. New app versions may add keys; compare against the latest English template when updating translations. Existing v2 keys should remain stable; changing a key requires explicit migration.
+
+System-owned menus/dialogs and raw CLI/OS errors may use the system or tool language. Application-owned text and validation messages use the selected language; missing translations fall back to English. Technical pack-validation diagnostics are English.
+
+简体中文：复制完整英文模板，只翻译右侧值，左侧英文原文保持不变。法语 Demo 仅作示例，缺失项回退英语。新版仍兼容旧中文键语言包。
+
+日本語：完全な英語テンプレートをコピーし、右側の値だけを翻訳してください。英語キーは変更しません。未翻訳の項目は英語に戻ります。旧形式の言語パックも読み込めます。
