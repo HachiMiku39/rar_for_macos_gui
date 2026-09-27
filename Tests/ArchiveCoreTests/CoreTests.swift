@@ -2,6 +2,48 @@ import XCTest
 @testable import ArchiveCore
 
 final class CoreTests: XCTestCase {
+    func testCreationOptionValidationAndMapping() throws {
+        var o = CreationOptions()
+        o.level = 5; o.dictionaryMB = 64; o.solid = true; o.blake2 = true; o.quickOpen = 2
+        o.threads = 2; o.accessTime = true; o.highPrecision = false; o.exclusions = "*.tmp\n*.DS_Store"
+        let args = try o.rarSwitches()
+        for flag in ["-m5", "-md64m", "-s", "-htb", "-qo+", "-mt2", "-tsm1", "-tsa1", "-tsc-", "-t", "-x*.tmp"] { XCTAssertTrue(args.contains(flag), flag) }
+        XCTAssertEqual(try JSONDecoder().decode(CreationOptions.self, from: JSONEncoder().encode(o)), o)
+        for pattern in ["/absolute", "../outside", "@list", "-df", "x\u{0}"] {
+            o.exclusions = pattern; XCTAssertThrowsError(try o.validatedPatterns(), pattern)
+        }
+        o.exclusions = ""; o.level = 99; XCTAssertThrowsError(try o.validatedPatterns())
+    }
+    func testAdvancedCreationRoundTrips() async throws {
+        guard let seven = ProcessInfo.processInfo.environment["ARCHIVEDESK_TEST_7ZZ"],
+              let rar = ProcessInfo.processInfo.environment["ARCHIVEDESK_TEST_RAR"] else { throw XCTSkip("Set engines") }
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let source = root.appendingPathComponent("Source")
+        try FileManager.default.createDirectory(at: source, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try Data("hello, advanced options".utf8).write(to: source.appendingPathComponent("Keep.txt"))
+        try Data("excluded".utf8).write(to: source.appendingPathComponent("Skip.tmp"))
+        let runner = CLIRunner(), secret = "test-only-password"
+        for format in CreationFormat.allCases {
+            var o = CreationOptions()
+            o.format = format; o.level = 4; o.dictionaryMB = 4; o.solid = true
+            o.blake2 = true; o.quickOpen = 2; o.threads = 2; o.exclusions = "*.tmp"
+            o.storeCompressed = true; o.accessTime = true; o.highPrecision = false
+            let output = root.appendingPathComponent("Test." + format.rawValue)
+            let args = try ArchiveCommands.create(output: output, inputs: [source], password: secret, headers: true, volumeMB: format == .rar ? 0 : 1, recovery: format == .rar ? 3 : 0, options: o)
+            XCTAssertFalse(args.contains { $0.contains(secret) })
+            let engine = format == .rar ? rar : seven
+            let result = try await runner.run(executable: engine, arguments: args, directory: root, password: secret) { _, _ in }
+            XCTAssertEqual(result.status, 0, "\(format): \(result.stdout) \(result.stderr)")
+            let first = format == .rar ? output : URL(fileURLWithPath: output.path + ".001")
+            let tested = try await runner.run(executable: seven, arguments: ArchiveCommands.test(first, password: secret, using: .sevenZip), password: secret) { _, _ in }
+            XCTAssertEqual(tested.status, 0, tested.stdout + tested.stderr)
+            let listed = try await runner.run(executable: seven, arguments: ArchiveCommands.list(first, password: secret, using: .sevenZip), password: secret) { _, _ in }
+            let rows = listed.archiveEntries(backend: .sevenZip)
+            XCTAssertTrue(rows.contains { $0.path == "Source/Keep.txt" }, listed.stdout)
+            XCTAssertFalse(rows.contains { $0.path.hasSuffix("Skip.tmp") })
+        }
+    }
     func testVirtualDirectoryNavigationAndTypes() {
         func item(_ path: String, folder: Bool = false) -> ArchiveEntry {
             ArchiveEntry(path: path, size: "20", modified: "", isDirectory: folder, isLink: false)
