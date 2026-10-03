@@ -31,9 +31,9 @@ final class PackageInspectorTests: XCTestCase {
         let file = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: file) }
         let result = try await CLIRunner().run(executable: "/usr/bin/yes", arguments: [], outputFile: file, outputLimit: 32) { _, _ in }
-        XCTAssertTrue(result.cancelled)
+        XCTAssertFalse(result.cancelled) // A resource limit is a failure, not a user cancellation.
         XCTAssertNotEqual(result.status, 0)
-        XCTAssertLessThanOrEqual(try Data(contentsOf: file).count, 32)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: file.path)) // Never publish a truncated output.
         let entries = ArchiveCommands.parse("Path = link\nSize = 1\nAttributes = A lrwxrwxrwx\n", backend: .sevenZip)
         XCTAssertEqual(entries.first?.isLink, true)
         XCTAssertThrowsError(try PackageExporter.plan(entries))
