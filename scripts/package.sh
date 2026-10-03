@@ -10,9 +10,10 @@ xcodebuild -project ArchiveDesk.xcodeproj -scheme ArchiveDesk -configuration Rel
 stage_dir="$(mktemp -d)"
 ditto --norsrc "$build_dir/Build/Products/Release/ArchiveDesk.app" "$stage_dir/ArchiveDesk.app"
 ln -s /Applications "$stage_dir/Applications"
-lipo "$stage_dir/ArchiveDesk.app/Contents/MacOS/ArchiveDesk" -verify_arch arm64 x86_64
-lipo "$stage_dir/ArchiveDesk.app/Contents/Resources/Tools/7zz" -verify_arch arm64 x86_64
-lipo "$stage_dir/ArchiveDesk.app/Contents/Resources/Tools/ArchiveDeskZIP" -verify_arch arm64 x86_64
+for binary in "$stage_dir/ArchiveDesk.app/Contents/MacOS/ArchiveDesk" "$stage_dir/ArchiveDesk.app/Contents/Resources/Tools/7zz" "$stage_dir/ArchiveDesk.app/Contents/Resources/Tools/ArchiveDeskZIP"; do
+  architectures=" $(xcrun lipo -archs "$binary") "
+  [[ "$architectures" == *" arm64 "* && "$architectures" == *" x86_64 "* ]]
+done
 test -s "$stage_dir/ArchiveDesk.app/Contents/Resources/AppIcon.icns"
 hdiutil create -volname ArchiveDesk -srcfolder "$stage_dir" -ov -format UDZO "$release_dir/ArchiveDesk-${version}-universal.dmg"
 ditto -c -k --norsrc --keepParent "$stage_dir/ArchiveDesk.app" "$release_dir/ArchiveDesk-${version}-universal.zip"

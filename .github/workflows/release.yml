@@ -8,7 +8,7 @@ permissions:
   contents: write
 concurrency:
   group: archivedesk-release
-  cancel-in-progress: false
+  cancel-in-progress: true
 jobs:
   release:
     runs-on: macos-26
