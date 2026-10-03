@@ -37,6 +37,8 @@ The destination is always a new folder. Existing files are not overwritten. Norm
 
 Existing restrictions on nested archive opening and direct `.app` resource launching remain. Drag-out, Quick Look, a full Manifest/plist editor, APK signature schemes, IPA code-signing details and repacking are not part of this version.
 
+From 0.7 onward, the new-folder rule above applies to internal staging. The GUI may then merge staged content into an existing destination with explicit conflict policies and backups; see EDITING-EXTRACTION.md.
+
 ## Tests and provenance
 
 Three user-supplied local samples were checked without executing them or uploading their bytes, metadata files, or the supplied research document. The source tree includes synthetic parser tests and an opt-in local integration test, not third-party packages. Set `ARCHIVEDESK_TEST_PACKAGES` to newline-separated local paths and `ARCHIVEDESK_TEST_7ZZ` to the engine executable. RAR tests additionally use `ARCHIVEDESK_TEST_RAR`.
