@@ -277,8 +277,9 @@ public final class CLIRunner: @unchecked Sendable {
         try checked(posix_spawnattr_setsigdefault(&attributes, &defaults))
         try checked(posix_spawnattr_setflags(&attributes, Int16(POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_CLOEXEC_DEFAULT | POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSIGDEF)))
         try checked(posix_spawnattr_setpgroup(&attributes, 0))
-        var args = ([executable] + arguments).map { strdup($0) } + [nil]
-        var env = ["PATH=/usr/bin:/bin", "LANG=en_US.UTF-8", "LC_ALL=en_US.UTF-8", "HOME=" + NSHomeDirectory()].map { strdup($0) } + [nil]
+        var args: [UnsafeMutablePointer<CChar>?] = ([executable] + arguments).map { value in value.withCString { strdup($0) } } + [nil]
+        let environment: [String] = ["PATH=/usr/bin:/bin", "LANG=en_US.UTF-8", "LC_ALL=en_US.UTF-8", "HOME=" + NSHomeDirectory()]
+        var env: [UnsafeMutablePointer<CChar>?] = environment.map { value in value.withCString { strdup($0) } } + [nil]
         defer { for p in args { free(p) }; for p in env { free(p) } }
         var child: pid_t = 0
         try lock.withLock {

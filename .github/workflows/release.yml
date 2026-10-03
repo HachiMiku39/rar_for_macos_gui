@@ -1,4 +1,4 @@
-name: Build and publish beta
+name: Build and publish beta # Swift 6.2+ / Xcode 26 compatibility
 on:
   push:
     branches: [main]
