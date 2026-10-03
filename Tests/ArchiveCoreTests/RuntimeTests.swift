@@ -3,6 +3,138 @@ import Darwin
 @testable import ArchiveCore
 
 final class RuntimeTests: XCTestCase {
+    func testProgressDecodingIsBoundedAndChunkSafe() {
+        let parser = EngineProgressDecoder()
+        parser.feed(Data(" 2".utf8)); parser.feed(Data("3% 1 - 日本語.txt\r".utf8))
+        XCTAssertEqual(parser.fraction, 0.23)
+        parser.feed(Data("filename99%.txt\n101%\n9999%\n".utf8))
+        XCTAssertEqual(parser.fraction, 0.23)
+        parser.feed(Data(repeating: 65, count: 2_000_000)); parser.feed(Data("99%\n 54%\u{8}\u{8}".utf8))
+        XCTAssertEqual(parser.fraction, 0.54)
+        parser.feed(Data(" 100%".utf8)); parser.finish(); XCTAssertEqual(parser.fraction, 1)
+    }
+    func testResourceRateMathAndProcessTransitions() {
+        var sampler = ResourceSampler()
+        let a = ResourceCounters(cpuNanoseconds: 10, memory: 100, read: 1000, written: 2000)
+        XCTAssertNil(sampler.sample(["app": a], at: 10).cpuPercent)
+        let b = ResourceCounters(cpuNanoseconds: 2_000_000_010, memory: 200, read: 2024, written: 4048)
+        let sampled = sampler.sample(["app": b], at: 11)
+        XCTAssertEqual(sampled.cpuPercent, 200); XCTAssertEqual(sampled.readPerSecond, 1024)
+        XCTAssertEqual(sampled.writePerSecond, 2048); XCTAssertEqual(sampled.memory, 200)
+        let joined = sampler.sample(["app": b, "new-helper": b], at: 12)
+        XCTAssertEqual(joined.cpuPercent, 0); XCTAssertEqual(joined.memory, 400)
+        let reset = sampler.sample(["app": a], at: 13)
+        XCTAssertNil(reset.cpuPercent) // Counter regression is unknown, never a huge unsigned delta.
+        XCTAssertNotNil(ResourceCounters.readProcess(getpid()))
+    }
+    func testCPUTimeMatchesPOSIXAccountingOnThisArchitecture() throws {
+        func cpuSeconds() -> Double {
+            var usage = rusage(); getrusage(RUSAGE_SELF, &usage)
+            return Double(usage.ru_utime.tv_sec + usage.ru_stime.tv_sec) + Double(usage.ru_utime.tv_usec + usage.ru_stime.tv_usec) / 1e6
+        }
+        let start = try XCTUnwrap(ResourceCounters.readProcess(getpid())), before = cpuSeconds()
+        let until = ProcessInfo.processInfo.systemUptime + 0.2
+        var count = 0
+        while ProcessInfo.processInfo.systemUptime < until { count += UUID().uuidString.count }
+        let after = cpuSeconds(), end = try XCTUnwrap(ResourceCounters.readProcess(getpid()))
+        XCTAssertGreaterThan(count, 0)
+        let measured = Double(end.cpuNanoseconds - start.cpuNanoseconds) / 1e9
+        XCTAssertEqual(measured, after - before, accuracy: max(0.02, (after - before) * 0.15))
+    }
+    func testImplicitDirectoryCollisionsAndBoundedPackRead() throws {
+        func file(_ path: String) -> ArchiveEntry { .init(path: path, size: "1", modified: "", isDirectory: false, isLink: false) }
+        XCTAssertThrowsError(try ExtractionSafety.validate([file("A/a.txt"), file("a/b.txt")]))
+        XCTAssertThrowsError(try ExtractionSafety.validate([file("é/a.txt"), file("e\u{301}/b.txt")]))
+        XCTAssertNoThrow(try ExtractionSafety.validate([file("a/a.txt"), file("a/b.txt")]))
+        let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+        let oversized = root.appendingPathComponent("language.json")
+        FileManager.default.createFile(atPath: oversized.path, contents: nil)
+        let handle = try FileHandle(forWritingTo: oversized); try handle.truncate(atOffset: 2_000_000_000); try handle.close()
+        XCTAssertThrowsError(try LanguagePack.readFile(oversized))
+        try Data("{}".utf8).write(to: oversized)
+        XCTAssertEqual(try LanguagePack.readFile(oversized), Data("{}".utf8))
+        XCTAssertThrowsError(try DiskSpace.requireStaging(UInt64.max, stage: root, destination: root))
+    }
+    func testCopyProgressIncludesFinalBytes() async throws {
+        let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+        let stage = root.appendingPathComponent("stage"), dest = root.appendingPathComponent("dest")
+        for url in [stage, dest] { try FileManager.default.createDirectory(at: url, withIntermediateDirectories: false) }
+        try Data(repeating: 17, count: 2_000_001).write(to: stage.appendingPathComponent("one"))
+        var last: ExtractionReport?
+        let result = try await ExtractionMerger.merge(from: stage, to: dest, policy: .skip, conflict: { _ in .cancel }) { last = $0 }
+        XCTAssertEqual(result.processedBytes, 2_000_001); XCTAssertEqual(last?.fraction, 1)
+        XCTAssertEqual(last?.currentFile, "one")
+    }
+    func testSafeCreationFailureCancellationAndRealRoundtrip() async throws {
+        guard let engine = ProcessInfo.processInfo.environment["ARCHIVEDESK_TEST_7ZZ"] else { throw XCTSkip("Engine not configured") }
+        let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+        let input = root.appendingPathComponent("sample.txt"), output = root.appendingPathComponent("out.zip")
+        try Data(repeating: 31, count: 4_000_000).write(to: input)
+        var options = CreationOptions(); options.format = .zip
+        let runner = CLIRunner()
+        var progressSeen = false
+        runner.observe = { if $0.fraction != nil { progressSeen = true } }
+        do {
+            _ = try await ArchiveCreator.create(output: output, inputs: [input], password: "", headers: false, volumeMB: 0, recovery: 0, options: options, executable: "/usr/bin/false", runner: runner) { _, _ in }
+            XCTFail("Failure published output")
+        } catch { }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: output.path))
+        XCTAssertFalse(try FileManager.default.contentsOfDirectory(atPath: root.path).contains { $0.hasPrefix(".ArchiveDesk-create-") })
+        let made = try await ArchiveCreator.create(output: output, inputs: [input], password: "secret-value", headers: false, volumeMB: 0, recovery: 0, options: options, executable: engine, runner: runner) { a, b in XCTAssertFalse((a+b).contains("secret-value")) }
+        XCTAssertEqual(made, output)
+        let verified = try await runner.run(executable: engine, arguments: ArchiveCommands.test(output, password: "secret-value", using: .sevenZip), password: "secret-value") { _, _ in }
+        XCTAssertEqual(verified.status, 0)
+        XCTAssertTrue(progressSeen, "Progress remains available even for password-protected jobs")
+        do {
+            _ = try await ArchiveCreator.create(output: output, inputs: [input], password: "", headers: false, volumeMB: 0, recovery: 0, options: options, executable: engine, runner: runner) { _, _ in }
+            XCTFail("Overwrote archive")
+        } catch { }
+        let split = try await ArchiveCreator.create(output: root.appendingPathComponent("parts.zip"), inputs: [input], password: "", headers: false, volumeMB: 1, recovery: 0, options: options, executable: engine, runner: runner) { _, _ in }
+        XCTAssertTrue(split.lastPathComponent.hasPrefix("parts-parts-"))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: split.appendingPathComponent("parts.zip.001").path))
+    }
+    func testCancelledCreationNeverPublishesAndClosedPipesDoNotHang() async throws {
+        let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+        let input = root.appendingPathComponent("source"), helper = root.appendingPathComponent("controlled-test-helper")
+        let output = root.appendingPathComponent("cancelled.zip")
+        try Data("source".utf8).write(to: input)
+        // Trusted test fixture; never execute any code from a supplied archive.
+        try Data("#!/bin/sh\nexec 1>&-\nexec 2>&-\nsleep 20\n".utf8).write(to: helper)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: helper.path)
+        var options = CreationOptions(); options.format = .zip
+        let runner = CLIRunner(), started = expectation(description: "created helper")
+        started.assertForOverFulfill = false
+        runner.observe = { if $0.state == .running { started.fulfill() } }
+        let task = Task { try await ArchiveCreator.create(output: output, inputs: [input], password: "", headers: false, volumeMB: 0, recovery: 0, options: options, executable: helper.path, runner: runner) { _, _ in } }
+        await fulfillment(of: [started], timeout: 5)
+        try await Task.sleep(nanoseconds: 300_000_000)
+        task.cancel()
+        do { _ = try await task.value; XCTFail("Cancelled job succeeded") } catch { XCTAssertTrue(error is CancellationError) }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: output.path))
+        XCTAssertFalse(try FileManager.default.contentsOfDirectory(atPath: root.path).contains { $0.hasPrefix(".ArchiveDesk-create-") })
+    }
+    func testStagedRARAnd7zCreation() async throws {
+        guard let seven = ProcessInfo.processInfo.environment["ARCHIVEDESK_TEST_7ZZ"], let rar = ProcessInfo.processInfo.environment["ARCHIVEDESK_TEST_RAR"] else { throw XCTSkip("Engines not configured") }
+        let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+        let input = root.appendingPathComponent("random.dat")
+        var random = SystemRandomNumberGenerator()
+        let data = Data((0..<1_200_000).map { _ in UInt8.random(in: 0...255, using: &random) })
+        try data.write(to: input)
+        for format in [CreationFormat.rar, .sevenZip] {
+            var options = CreationOptions(); options.format = format
+            let output = root.appendingPathComponent("test." + format.rawValue)
+            let runner = CLIRunner()
+            var phaseNames: [String] = []
+            let final = try await ArchiveCreator.create(output: output, inputs: [input], password: "test-secret", headers: true, volumeMB: 1, recovery: 0, options: options, executable: format == .rar ? rar : seven, runner: runner, phase: { phase, _ in phaseNames.append(phase) }) { _, _ in }
+            let parts = try FileManager.default.contentsOfDirectory(at: final, includingPropertiesForKeys: nil).sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
+            XCTAssertGreaterThanOrEqual(parts.count, 2)
+            let first = try XCTUnwrap(parts.first)
+            XCTAssertTrue(FileManager.default.fileExists(atPath: first.path))
+            let verify = try await runner.run(executable: seven, arguments: ArchiveCommands.test(first, password: "test-secret", using: .sevenZip), password: "test-secret") { _, _ in }
+            XCTAssertEqual(verify.status, 0, verify.stderr)
+            XCTAssertTrue(phaseNames.contains("Verifying")); XCTAssertEqual(phaseNames.last, "Publishing files")
+        }
+    }
     func testCRCFailureNeverPublishesBinaryOutput() async throws {
         guard let engine = ProcessInfo.processInfo.environment["ARCHIVEDESK_TEST_7ZZ"] else { throw XCTSkip("Engine not configured") }
         let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
