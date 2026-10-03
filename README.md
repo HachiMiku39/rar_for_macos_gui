@@ -4,9 +4,18 @@
 
 ## 安装
 
-在 [Releases](https://github.com/HachiMiku39/rar_for_macos_gui/releases) 下载最新版 `ArchiveDesk-0.8.0-universal.dmg`，打开后把 **ArchiveDesk** 拖到 **Applications**。
+在 [Releases](https://github.com/HachiMiku39/rar_for_macos_gui/releases) 下载 `ArchiveDesk-0.9.0-universal.dmg`（预发布版），打开后把 **ArchiveDesk** 拖到 **Applications**。
 
 这是未经 Developer ID 签名和公证的原型版本。如果 macOS 阻止打开，请优先用下方源码在 Xcode 中构建；不需要关闭系统安全保护。
+
+## 0.9：进度与资源监控（预发布版）
+
+- 压缩／解压／校验显示引擎报告的当前阶段百分比；写入目标文件阶段按已处理字节显示进度。未知进度显示活动条，不伪造总进度。
+- CPU、RAM、进程磁盘读写速率每 0.5 秒采样；同时显示目标卷已用／剩余空间和经过时间。CPU 100% = 一个核心，统计范围为 ArchiveDesk＋当前引擎；进程 I/O 不是物理磁盘繁忙率，缓存读取可能为零。
+- 创建压缩包改为私有目录暂存，成功（以及可选校验）后发布；取消／失败不留下最终名称的半成品。单文件流式复制提交，分卷整体提交到新文件夹。
+- 修复关闭输出管道后的空转、取消与输出提交之间的竞态、同盘双份空间预检、隐含目录的大小写／Unicode 冲突，以及已导入语言包启动读取未限额的问题。
+
+具体审查结果、商业软件参考和限制见 [0.9 审查与监控说明](docs/REVIEW-0.9.md)。本版没有宣称完成安全沙箱、100 GB 压力验证、暂停／恢复或设备级磁盘利用率监控。
 
 ## 0.7 新增
 
