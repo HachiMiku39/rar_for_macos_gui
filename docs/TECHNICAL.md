@@ -1,5 +1,7 @@
 # ArchiveDesk 0.2 — 内置解压引擎的原生 macOS 压缩包管理器
 
+> 历史设计记录，仅描述 0.2，不代表当前版本。1.0 beta 的功能和限制以 [README](../README.md)、[Beta 说明](BETA-1.0.md)、[可靠性说明](RELIABILITY.md) 和 [验证记录](../VALIDATION.md) 为准；进程启动已替换为 posix_spawn，ZIP/7z/TAR 创建、层级导航、Quick Look 和串行队列均已加入。
+
 SwiftUI + Foundation.Process，macOS 14 及以上。布局采用侧边栏、工具栏、文件表格和任务日志，使用系统控件及 SF Symbols。与 RARLAB / WinRAR 无隶属关系，不包含其商标图标、界面素材或编解码实现。
 
 ## 运行

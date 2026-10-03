@@ -1,5 +1,6 @@
 import SwiftUI
 import UniformTypeIdentifiers
+import QuickLook
 #if canImport(ArchiveCore)
 import ArchiveCore
 #endif
@@ -54,6 +55,11 @@ struct ContentView: View {
                     SecureField(language.text("Archive password (this session only)"), text: $model.password).frame(maxWidth: 280)
                     Button(language.text("Reload")) { model.browse() }.disabled(model.archive == nil)
                     Button(language.text("Clear Password")) { model.password = "" }
+                    if let archive = model.archive, ["zip", "zipx", "z01"].contains(archive.pathExtension.lowercased()) {
+                        Picker(language.text("ZIP filename encoding"), selection: $model.zipEncoding) {
+                            ForEach(ZIPNameEncoding.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+                        }.frame(maxWidth: 235).onChange(of: model.zipEncoding) { _, _ in model.browse() }
+                    }
                     Spacer()
                     Toggle(language.text("Task Log"), isOn: $showLog).toggleStyle(.checkbox)
                 }.padding(10).archiveGlass().padding(.horizontal, 10).disabled(model.busy)
@@ -63,7 +69,7 @@ struct ContentView: View {
                         logPane(language.text("Error output · stderr"), text: model.stderr)
                     }.frame(height: 170)
                 }
-                if model.busy { taskMonitor }
+                if model.busy { TaskMetricsView() }
                 statusBar
             }
         }
@@ -89,6 +95,15 @@ struct ContentView: View {
                 } label: { Label(language.text("Recovery Data"), systemImage: "cross.case") }.disabled(model.archive?.pathExtension.lowercased() != "rar")
             }
             ToolbarItem {
+                Menu {
+                    Button(language.text("Batch extract…")) { model.chooseBatch() }.disabled(model.busy)
+                    Button(language.text("Task queue")) { model.showQueue = true }
+                    Button(language.text("Task progress")) { model.showTaskProgress() }.disabled(!model.hasTaskReport)
+                    Button(language.text("File checksums")) { model.showChecksums = true }.disabled(model.busy)
+                    Button(language.text("Quick Look")) { if let item = model.selectedEntry { model.preview(item) } }.disabled(model.busy || model.selectedEntry == nil)
+                } label: { Label(language.text("Tools"), systemImage: "wrench.and.screwdriver") }
+            }
+            ToolbarItem {
                 Button { model.archiveInfo() } label: { Label(language.text("Archive Information"), systemImage: "info.circle") }.disabled(model.archive == nil || model.busy)
             }
             ToolbarItem {
@@ -105,6 +120,9 @@ struct ContentView: View {
         .sheet(isPresented: $model.showCreate) { CreateView().environmentObject(model) }
         .sheet(isPresented: $model.showExtraction) { ExtractionOptionsView().environmentObject(model).environmentObject(language) }
         .sheet(isPresented: $model.showPackage) { PackageInspectionView().environmentObject(model).environmentObject(language) }
+        .sheet(isPresented: $model.showQueue) { BatchQueueView().environmentObject(model).environmentObject(language) }
+        .sheet(isPresented: $model.showChecksums) { ChecksumView().environmentObject(language) }
+        .quickLookPreview($model.quickLookURL)
         .alert(language.text("Operation Unsuccessful"), isPresented: Binding(get: { model.error != nil }, set: { if !$0 { model.error = nil } })) { Button(language.text("OK")) { model.error = nil } } message: { Text(language.text(model.error ?? "")) }
         .frame(minWidth: 900, minHeight: 600)
     }
@@ -128,55 +146,9 @@ struct ContentView: View {
                 Text(language.text(task.state.rawValue)).font(.caption).foregroundStyle(.secondary)
             }
             Spacer()
+            if model.hasTaskReport { Button(language.text("Task progress")) { model.showTaskProgress() } }
             if model.busy { Button(language.text("Cancel Task")) { model.cancelCurrentTask() } }
         }.padding(10).background(.bar)
-    }
-    private func byteText(_ value: UInt64?) -> String {
-        guard let value else { return "—" }
-        if value == 0 { return "0 B" }
-        return ByteCountFormatter.string(fromByteCount: Int64(min(value, UInt64(Int64.max))), countStyle: .binary)
-    }
-    private func rateText(_ value: Double?) -> String {
-        guard let value, value.isFinite, value >= 0 else { return "—" }
-        return byteText(UInt64(min(value, Double(Int64.max / 2)))) + "/s"
-    }
-    private var taskMonitor: some View {
-        let sample = model.resourceSample
-        return VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Label(language.text(model.taskPhase), systemImage: "chart.bar.xaxis")
-                Spacer()
-                Text(language.text("Elapsed: {0}", String(format: "%02d:%02d", Int(sample.elapsed) / 60, Int(sample.elapsed) % 60)))
-                Text(model.progress.map { String(format: "%.0f%%", $0 * 100) } ?? language.text("Indeterminate"))
-                    .frame(minWidth: 90, alignment: .trailing)
-            }.font(.callout).monospacedDigit()
-            if let value = model.progress { ProgressView(value: value).accessibilityLabel(language.text("Current phase progress")) }
-            else { ProgressView().progressViewStyle(.linear).accessibilityLabel(language.text("Indeterminate")) }
-            HStack(spacing: 24) {
-                metric("CPU", sample.cpuPercent.map { String(format: "%.1f%%", $0) } ?? "—", "cpu")
-                metric("RAM", byteText(sample.memory), "memorychip")
-                metric("Disk read", rateText(sample.readPerSecond), "arrow.down.circle")
-                metric("Disk write", rateText(sample.writePerSecond), "arrow.up.circle")
-                Spacer(minLength: 0)
-            }
-            if let total = sample.capacity, let free = sample.free, total > 0 {
-                HStack {
-                    Label(language.text("Destination volume"), systemImage: "externaldrive")
-                    Text(language.text("Used: {0} · Free: {1}", byteText(total - min(free, total)), byteText(free)))
-                    Spacer()
-                    Text(String(format: "%.1f%%", Double(total - min(free, total)) / Double(total) * 100)).monospacedDigit()
-                }.font(.caption)
-            } else { Text(language.text("Destination volume: unavailable")).font(.caption) }
-            if !model.currentTaskFile.isEmpty { Text(model.currentTaskFile).font(.caption).lineLimit(1).truncationMode(.middle) }
-            Text(language.text("Current phase only. CPU/RAM/I/O: ArchiveDesk + active engine; 100% CPU = one core. I/O is sampled process disk traffic, not device utilization; cached reads may be zero. — means unavailable."))
-                .font(.caption2).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-        }.padding(12).archiveGlass().padding(.horizontal, 10).padding(.top, 8)
-    }
-    private func metric(_ title: String, _ value: String, _ icon: String) -> some View {
-        VStack(alignment: .leading, spacing: 3) {
-            Label(language.text(title), systemImage: icon).font(.caption).foregroundStyle(.secondary)
-            Text(value).font(.system(.callout, design: .monospaced)).monospacedDigit()
-        }.frame(minWidth: 100, alignment: .leading)
     }
     private var entryTable: some View {
         Table(model.visible, selection: $model.selection) {
@@ -187,6 +159,7 @@ struct ContentView: View {
                         .frame(width: 22)
                     Text(model.filter.isEmpty ? item.name : item.path).lineLimit(1)
                 }.help(item.category == "Archive" ? language.text("Opening nested archives is not supported yet.") : item.path)
+                    .onDrag { model.dragProvider(item) }
             }.width(min: 220)
             TableColumn(language.text("Kind")) { (item: ArchiveEntry) in
                 Text(item.isDirectory || item.suffix.isEmpty ? language.text(item.category) : item.suffix.uppercased() + " · " + language.text(item.category))
@@ -196,6 +169,9 @@ struct ContentView: View {
             TableColumn(language.text("Modified"), value: \ArchiveEntry.modified).width(170)
         }
         .contextMenu(forSelectionType: String.self) { ids in
+            Button(language.text("Quick Look")) {
+                if let item = model.visible.first(where: { ids.contains($0.id) }) { model.preview(item) }
+            }.disabled(ids.count != 1 || model.busy)
             Button(language.text("Open Selected Item")) {
                 if let item = model.visible.first(where: { ids.contains($0.id) }) { model.activate(item) }
             }.disabled(ids.count != 1 || model.busy || model.visible.contains { ids.contains($0.id) && $0.category == "Archive" })
@@ -313,6 +289,8 @@ struct CreateView: View {
     @State private var confirmation = ""
     @State private var headers = true
     @State private var volume = "0"
+    @State private var split = false
+    @State private var volumeGiB = false
     @State private var recovery = 0
     @State private var options = Self.savedProfile()
     @State private var profileSaved = false
@@ -353,18 +331,26 @@ struct CreateView: View {
                     Picker(language.text("Compression Level"), selection: $options.level) {
                         ForEach(Array(["Store Only", "Fastest", "Fast", "Normal", "Good", "Best"].enumerated()), id: \.offset) { i, key in Text(language.text(key)).tag(i) }
                     }
-                    Toggle(language.text("Solid Archive"), isOn: $options.solid).disabled(options.format == .zip)
+                    Toggle(language.text("Solid Archive"), isOn: $options.solid).disabled(options.format == .zip || options.format.isTar)
                     Picker(language.text("RAR Dictionary Size"), selection: $options.dictionaryMB) {
                         ForEach([4,8,16,32,64,128,256], id: \.self) { Text("\($0) MB").tag($0) }
                     }.disabled(options.format != .rar)
-                    TextField(language.text("Volume size (MB; 0 = single archive)"), text: $volume)
+                    Toggle(language.text("Split into volumes"), isOn: $split).disabled(options.format.isTar)
+                    if split {
+                        HStack {
+                            TextField(language.text("Volume size (maximum 4 GiB)"), text: $volume)
+                            Picker("", selection: $volumeGiB) { Text("MiB").tag(false); Text("GiB").tag(true) }.frame(width: 100)
+                        }
+                        Text(language.text("1 GiB = 1024 MiB. The final volume may be smaller. ZIP volumes use the 7-Zip split format.")).font(.caption)
+                    }
+                    if options.format.isTar { Text(language.text("TAR preserves Unix modes and times. Passwords, split volumes, ACLs and extended attributes are not supported here.")).font(.caption) }
                     Toggle(language.text("Test After Archiving"), isOn: $options.testAfter)
                     Text(language.text("Solid mode can improve compression of similar files, but single-file extraction may be slower. Volumes use a new separate folder.")).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 }
                 case 1:
                 Form {
-                    SecureField(language.text("Password (optional)"), text: $password)
-                    SecureField(language.text("Confirm password"), text: $confirmation)
+                    SecureField(language.text("Password (optional)"), text: $password).disabled(options.format.isTar)
+                    SecureField(language.text("Confirm password"), text: $confirmation).disabled(options.format.isTar)
                     Toggle(language.text("Encrypt file names"), isOn: $headers).disabled(password.isEmpty || options.format == .zip)
                     Text(language.text("ZIP uses AES-256 but cannot encrypt filenames; some system extractors do not support it. RAR5 / 7z support filename encryption.")).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                     Picker(language.text("Recovery record"), selection: $recovery) {
@@ -404,12 +390,13 @@ struct CreateView: View {
                 Spacer()
                 Button(language.text("Cancel")) { dismiss() }
                 Button(language.text("Choose Save Location…")) {
-                    model.create(password: password, headers: headers, volume: Int(volume) ?? -1, recovery: options.format == .rar ? recovery : 0, options: options)
+                    model.create(password: password, headers: headers, volume: split ? ((try? VolumeSize.mebibytes(volume, gibibytes: volumeGiB)) ?? -1) : 0, recovery: options.format == .rar ? recovery : 0, options: options)
                 }.buttonStyle(.borderedProminent)
-                    .disabled(password != confirmation || !(0...1_000_000).contains(Int(volume) ?? -1) || model.inputs.isEmpty || (try? options.validatedPatterns()) == nil)
+                    .disabled(password != confirmation || (split && (try? VolumeSize.mebibytes(volume, gibibytes: volumeGiB)) == nil) || model.inputs.isEmpty || (try? options.validatedPatterns()) == nil)
             }
         }.frame(width: 612).padding(24)
             .onDisappear { password = ""; confirmation = "" }
+            .onChange(of: options.format) { _, format in if format.isTar { password = ""; confirmation = ""; split = false; recovery = 0 } }
     }
 }
 
@@ -470,7 +457,7 @@ struct SettingsView: View {
     }
 }
 
-private extension View {
+extension View {
     @ViewBuilder func archiveGlass() -> some View {
         if #available(macOS 26.0, *) {
             self.glassEffect(.regular, in: .rect(cornerRadius: 14))

@@ -1,7 +1,20 @@
 import SwiftUI
 import AppKit
 
+/// Load the bundled bitmap explicitly as well as declaring CFBundleIconFile.
+/// Dock can otherwise retain a blank launch-time icon for an unsigned replacement build.
+@MainActor final class ArchiveDeskAppDelegate: NSObject, NSApplicationDelegate {
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        guard let url = Bundle.main.url(forResource: "AppIcon", withExtension: "icns"),
+              let icon = NSImage(contentsOf: url), icon.isValid else { return }
+        icon.isTemplate = false
+        NSApplication.shared.applicationIconImage = icon
+        NSApplication.shared.dockTile.display()
+    }
+}
+
 @main struct ArchiveDeskApp: App {
+    @NSApplicationDelegateAdaptor(ArchiveDeskAppDelegate.self) private var appDelegate
     @StateObject private var model = Model()
     @StateObject private var language = AppLanguage.shared
     var body: some Scene {

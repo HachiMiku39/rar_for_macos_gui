@@ -64,7 +64,11 @@ public struct ResourceCounters {
 }
 
 public struct ResourceSample {
+    /// Activity Monitor process scale: one busy logical CPU = 100% (may exceed 100%).
     public var cpuPercent: Double?
+    /// Share of this Mac's total logical CPU capacity used by the sampled processes.
+    /// This is not system-wide usage by all applications.
+    public var cpuCapacityPercent: Double?
     public var memory: UInt64?
     public var readPerSecond: Double?
     public var writePerSecond: Double?
@@ -80,7 +84,8 @@ public struct ResourceSampler {
     private var previous: [String: ResourceCounters] = [:]
     private var lastTime: Double?
     public init() {}
-    public mutating func sample(_ counters: [String: ResourceCounters], at time: Double) -> ResourceSample {
+    public mutating func sample(_ counters: [String: ResourceCounters], at time: Double,
+                                logicalCPUCount: Int = ProcessInfo.processInfo.activeProcessorCount) -> ResourceSample {
         defer { previous = counters; lastTime = time }
         var result = ResourceSample()
         guard !counters.isEmpty else { return result }
@@ -96,7 +101,11 @@ public struct ResourceSampler {
             read += Double(now.read - old.read) / duration
             written += Double(now.written - old.written) / duration
         }
-        if valid { result.cpuPercent = cpu; result.readPerSecond = read; result.writePerSecond = written }
+        if valid {
+            result.cpuPercent = cpu
+            if logicalCPUCount > 0 { result.cpuCapacityPercent = min(100, max(0, cpu / Double(logicalCPUCount))) }
+            result.readPerSecond = read; result.writePerSecond = written
+        }
         return result
     }
 }
@@ -198,6 +207,10 @@ public final class CLIRunner: @unchecked Sendable {
     }
     public func run(executable: String, arguments: [String], directory: URL? = nil, password: String = "", outputFile: URL? = nil, outputLimit: Int? = nil, diskGuard: URL? = nil, update: @escaping (String, String) -> Void) async throws -> CLIResult {
         try Task.checkCancellation()
+        // Official macOS 7zz does not implement legacy Windows code pages.
+        // Use an isolated system-libarchive adapter consistently for both listing and extraction.
+        let manualZIP = arguments.prefix(while: { $0 != "--" }).contains { $0.hasPrefix("-mcp=") }
+        let executable = manualZIP ? (ProcessInfo.processInfo.environment["ARCHIVEDESK_TEST_ZIP_HELPER"] ?? Bundle.main.resourceURL?.appendingPathComponent("Tools/ArchiveDeskZIP").path ?? "") : executable
         _ = try ArchiveCommands.passwordSwitch(password)
         guard executable.hasPrefix("/"), !executable.contains("\0"), arguments.allSatisfy({ !$0.contains("\0") }),
               FileManager.default.isExecutableFile(atPath: executable),

@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import UniformTypeIdentifiers
 #if canImport(ArchiveCore)
 import ArchiveCore
 #endif
@@ -9,6 +10,14 @@ import ArchiveCore
     @Published var archive: URL?
     @Published var entries: [ArchiveEntry] = [] { didSet { refreshVisible() } }
     @Published var selection: Set<String> = []
+    @Published var zipEncoding: ZIPNameEncoding = .auto
+    @Published var quickLookURL: URL?
+    @Published var showQueue = false
+    @Published var showChecksums = false
+    @Published var queue: [BatchArchive] = []
+    @Published var queueRunning = false
+    private var conflictForAll: ConflictChoice?
+    private var conflictAlert: NSAlert?
     @Published var filter = "" { didSet { refreshVisible() } }
     @Published var busy = false { didSet { if busy != oldValue { busy ? startMonitoring() : stopMonitoring() } } }
     @Published var status = AppLanguage.shared.text("Open an archive, or drop files to create one")
@@ -19,6 +28,15 @@ import ArchiveCore
     @Published var resourceSample = ResourceSample()
     @Published var taskPhase = "Preparing"
     @Published var currentTaskFile = ""
+    @Published var hasTaskReport = false
+    @Published var taskTitle = "Task progress"
+    @Published var taskResult = "running"
+    @Published var cancellingTask = false
+    @Published var lastPhaseProgress: Double?
+    @Published var taskElapsed: TimeInterval = 0
+    private var taskStartedAt = ProcessInfo.processInfo.systemUptime
+    private var taskHadError = false
+    private lazy var progressWindow = TaskProgressWindowController(model: self)
     private var monitorTask: Task<Void, Never>?
     private var monitorID = UUID()
     private var monitorLocation: URL?
@@ -35,7 +53,7 @@ import ArchiveCore
     private var extractionSelection: [String] = []
     var canEdit: Bool { archive != nil && editRefusal.isEmpty && !busy && !inspecting }
     @Published var inputs: [URL] = []
-    @Published var error: String?
+    @Published var error: String? { didSet { if busy && error != nil { taskHadError = true } } }
     @Published var recent: [URL] = (UserDefaults.standard.stringArray(forKey: "recentArchives") ?? []).map { URL(fileURLWithPath: $0) }
     @Published var directory = "" { didSet { refreshVisible() } }
     @Published var packageKind: PackageKind?
@@ -45,6 +63,7 @@ import ArchiveCore
     @Published var inspectionLog = ""
     private var inspectionTask: Task<Void, Never>?
     private var exportTask: Task<Void, Never>?
+    private var copyRequestID: UUID?
     private let inspectionRunner = CLIRunner()
     private var inspectionID = UUID()
     @Published var appearance = UserDefaults.standard.string(forKey: "appearance") ?? "system" {
@@ -73,6 +92,9 @@ import ArchiveCore
     }
     private func startMonitoring() {
         monitorTask?.cancel(); monitorID = UUID()
+        progressWindow.hide()
+        hasTaskReport = false; cancellingTask = false; taskHadError = false; taskResult = "running"; lastPhaseProgress = nil
+        taskStartedAt = ProcessInfo.processInfo.systemUptime; taskElapsed = 0
         let id = monitorID, engine = runner, location = monitorLocation ?? FileManager.default.temporaryDirectory
         resourceSample = ResourceSample(); engineTask = nil; progress = nil; taskPhase = "Preparing"; currentTaskFile = ""
         monitorTask = Task.detached(priority: .utility) { [weak self] in
@@ -93,7 +115,19 @@ import ArchiveCore
         }
     }
     private func acceptSample(_ sample: ResourceSample, id: UUID) { if busy && monitorID == id { resourceSample = sample } }
-    private func stopMonitoring() { monitorTask?.cancel(); monitorTask = nil; monitorID = UUID(); monitorLocation = nil }
+    private func stopMonitoring() {
+        taskElapsed = ProcessInfo.processInfo.systemUptime - taskStartedAt
+        lastPhaseProgress = progress
+        taskResult = taskHadError ? "failed" : (cancellingTask || (queueRunning && queue.contains { $0.state == "cancelled" })) ? "cancelled" : "completed"
+        monitorTask?.cancel(); monitorTask = nil; monitorID = UUID(); monitorLocation = nil
+        // Keep the final report visible, even if the archive finished between samples.
+        if hasTaskReport { progressWindow.refreshTitle() }
+    }
+    private func presentTaskProgress(_ title: String) {
+        taskTitle = title; hasTaskReport = true; progressWindow.show()
+    }
+    func showTaskProgress() { if hasTaskReport { progressWindow.show() } }
+    func hideTaskProgress() { progressWindow.hide() }
     @Published private(set) var visible: [ArchiveEntry] = []
     @Published private(set) var visibleTotal = 0
     private var allVisible: [ArchiveEntry] = []
@@ -129,37 +163,100 @@ import ArchiveCore
     func activate(_ item: ArchiveEntry) {
         guard !busy else { return }
         if item.isDirectory { navigate(item.path); return }
-        guard item.category != "Archive" else { error = language.text("Opening nested archives is not supported yet."); return }
         guard item.canOpenCopy else { error = language.text("This type cannot be opened directly. Extract it first and inspect it yourself."); return }
-        guard let archive, entries.allSatisfy({ ArchiveCommands.safePath($0.path) && !$0.isLink }),
-              let size = UInt64(item.size), size <= PreviewSafety.maximumBytes else {
-            error = language.text("Only regular files in safe, link-free archives can be opened, up to 512 MB per file."); return
-        }
-        let notice = NSAlert()
-        notice.messageText = language.text("Open a temporary copy?")
+        let notice = NSAlert(); notice.messageText = language.text("Open a temporary copy?")
         notice.informativeText = language.text("The system default app will open this copy. Open only trusted files. Edits are not saved back to the archive; temporary copies are removed when ArchiveDesk quits.")
         notice.addButton(withTitle: language.text("Open")); notice.addButton(withTitle: language.text("Cancel"))
         guard notice.runModal() == .alertFirstButtonReturn else { return }
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent("ArchiveDesk-open-" + UUID().uuidString, isDirectory: true)
-        do {
-            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
-            let args = try ArchiveCommands.extract(session?.workingURL ?? archive, destination: root, selected: [item.path], password: password, using: .sevenZip)
-            openedCopies.append(root)
-            var retained = false
-            launch(language.text("Preparing to Open File"), executable: resolvedSevenZip, args: args, secret: password, completion: {
-                if !retained { try? FileManager.default.removeItem(at: root); self.openedCopies.removeAll { $0 == root } }
-            }) { _ in
-                do {
-                    let file = root.appendingPathComponent(item.path)
-                    try PreviewSafety.validate(file, inside: root)
-                    guard NSWorkspace.shared.open(file) else { throw ArchiveError.invalid("No default app could open this file.") }
-                    retained = true
-                    self.status = self.language.text("Opened a temporary copy. Changes will not be saved to the archive.")
-                } catch { self.error = self.language.message(error) }
-            }
-        } catch { try? FileManager.default.removeItem(at: root); self.error = language.message(error) }
+        prepareCopy(item, inspect: true) { result in
+            if case .success(let url) = result { NSWorkspace.shared.open(url) }
+        }
     }
     func savePaths() { for (key, value) in [("rar", rar), ("sevenZipOverrideV2", sevenZip)] { UserDefaults.standard.set(value, forKey: key) } }
+    func preview(_ item: ArchiveEntry) {
+        guard item.canOpenCopy else { error = language.text("This type cannot be previewed. Extract it to inspect it yourself."); return }
+        prepareCopy(item, inspect: true) { result in if case .success(let url) = result { self.quickLookURL = url } }
+    }
+    private func prepareCopy(_ item: ArchiveEntry, inspect: Bool, requestID: UUID = UUID(), completion: @escaping (Result<URL, Error>) -> Void) {
+        guard !busy, let source = session?.workingURL ?? archive else { completion(.failure(ArchiveError.invalid("Another task is running."))); return }
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("ArchiveDesk-open-" + UUID().uuidString)
+        do { try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700]) }
+        catch { completion(.failure(error)); return }
+        let rows = entries, engine = resolvedSevenZip, secret = password, encoding = zipEncoding, engineRunner = runner
+        busy = true; copyRequestID = requestID; status = language.text("Preparing file export")
+        exportTask = Task {
+            defer { copyRequestID = nil; busy = false; progress = nil }
+            do {
+                let work = Task.detached(priority: .userInitiated) {
+                    let file = try await SingleFileExporter.export(item, entries: rows, source: source, root: root, engine: engine, password: secret, encoding: encoding, runner: engineRunner) { a, b in
+                        Task { @MainActor in self.stdout = a; self.stderr = b }
+                    }
+                    if inspect { try PreviewSafety.validate(file, inside: root) }
+                    return file
+                }
+                let file = try await withTaskCancellationHandler(operation: { try await work.value }, onCancel: { work.cancel(); engineRunner.cancel() })
+                openedCopies.append(root); status = language.text("Temporary copy ready. Changes are not saved to the archive."); completion(.success(file))
+            } catch {
+                try? FileManager.default.removeItem(at: root); self.error = language.message(error); completion(.failure(error))
+            }
+        }
+    }
+    func dragProvider(_ item: ArchiveEntry) -> NSItemProvider {
+        let provider = NSItemProvider(); provider.suggestedName = item.name
+        guard !busy, !item.isDirectory, !item.isLink else { return provider }
+        let type = UTType(filenameExtension: item.suffix) ?? .data
+        provider.registerFileRepresentation(forTypeIdentifier: type.identifier, fileOptions: [], visibility: .all) { completion in
+            let progress = Progress(totalUnitCount: 1)
+            let requestID = UUID()
+            progress.cancellationHandler = { Task { @MainActor in if self.copyRequestID == requestID { self.cancelCurrentTask() } } }
+            Task { @MainActor in
+                if progress.isCancelled { completion(nil, false, CancellationError()); return }
+                self.prepareCopy(item, inspect: false, requestID: requestID) { result in
+                    switch result {
+                    case .success(let url): progress.completedUnitCount = 1; completion(url, false, nil)
+                    case .failure(let error): completion(nil, false, error)
+                    }
+                }
+            }
+            return progress
+        }
+        return provider
+    }
+    func chooseBatch() {
+        guard !busy else { showQueue = queueRunning; return }
+        let panel = NSOpenPanel(); panel.allowsMultipleSelection = true; panel.canChooseDirectories = false
+        guard panel.runModal() == .OK else { return }
+        queue = panel.urls.map { BatchArchive(source: $0) }; showQueue = true
+    }
+    func startBatch(secret: String, encoding: ZIPNameEncoding) {
+        guard !busy, !queue.isEmpty else { return }
+        let panel = NSOpenPanel(); panel.canChooseFiles = false; panel.canChooseDirectories = true
+        panel.prompt = language.text("Choose Extraction Location")
+        guard panel.runModal() == .OK, let parent = panel.url else { return }
+        let jobs = queue.map { BatchArchive(source: $0.source) }; queue = jobs
+        let engine = resolvedSevenZip, policy = extractionPolicy, engineRunner = runner
+        monitorLocation = parent; busy = true; queueRunning = true
+        presentTaskProgress("Batch extraction queue")
+        exportTask = Task {
+            defer { busy = false; queueRunning = false; progress = nil }
+            let work = Task.detached(priority: .userInitiated) {
+                await BatchArchives.execute(jobs, process: { job in
+                    await self.resetConflictChoice()
+                    return try await BatchExtractor.extract(job.source, parent: parent, engine: engine, runner: engineRunner, password: secret, encoding: encoding, policy: policy, conflict: { path in await self.askConflict(path) }, update: { a, b in
+                        Task { @MainActor in self.stdout = a; self.stderr = b }
+                    }, progress: { report in Task { @MainActor in self.updateTaskPhase("Publishing files", fraction: report.fraction); self.currentTaskFile = report.currentFile } })
+                }, update: { job in await self.acceptJob(job) })
+            }
+            _ = await withTaskCancellationHandler(operation: { await work.value }, onCancel: { work.cancel(); engineRunner.cancel() })
+            status = language.text("Batch finished. Check each task result.")
+        }
+    }
+    private func resetConflictChoice() { conflictForAll = nil }
+    private func acceptJob(_ job: BatchArchive) {
+        if job.state == "failed" { taskHadError = true }
+        if let index = queue.firstIndex(where: { $0.id == job.id }) { queue[index] = job }
+        if job.state == "running" { status = job.source.lastPathComponent; progress = nil }
+    }
     func executable(for url: URL) -> String { resolvedSevenZip }
     func chooseArchive() {
         guard !busy else { return }
@@ -168,6 +265,9 @@ import ArchiveCore
     }
     func receive(_ urls: [URL]) {
         guard !busy else { return }
+        if urls.count > 1, urls.allSatisfy({ ArchiveCommands.extensions.contains($0.pathExtension.lowercased()) && (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) != true }) {
+            queue = urls.map { BatchArchive(source: $0) }; showQueue = true; return
+        }
         if urls.count == 1, let url = urls.first, ArchiveCommands.extensions.contains(url.pathExtension.lowercased()), (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) != true { open(url) }
         else { inputs = urls; showCreate = true }
     }
@@ -179,7 +279,7 @@ import ArchiveCore
     func open(_ url: URL) {
         guard !busy else { return }
         cancelInspection(); packageKind = nil; packageReport = nil
-        session = nil; archive = url; entries = []; selection = []; password = ""; filter = ""; directory = ""
+        session = nil; archive = url; entries = []; selection = []; password = ""; filter = ""; directory = ""; zipEncoding = .auto
         recent.removeAll { $0 == url }; recent.insert(url, at: 0); recent = Array(recent.prefix(10))
         UserDefaults.standard.set(recent.map(\.path), forKey: "recentArchives")
         NSDocumentController.shared.noteNewRecentDocumentURL(url)
@@ -189,7 +289,7 @@ import ArchiveCore
         guard !busy else { return }
         guard let archive else { return }
         do {
-            let args = try ArchiveCommands.list(archive, password: password, using: .sevenZip)
+            let args = try ArchiveCommands.list(archive, password: password, using: .sevenZip, encoding: zipEncoding)
             editRefusal = "Archive must be listed successfully before editing."
             entries = []; selection = []; directory = ""
             launch(language.text("Reading archive"), executable: executable(for: archive), args: args, secret: password, preparing: archive) { result in
@@ -197,6 +297,7 @@ import ArchiveCore
                 guard Set(parsed.map(\.path)).count == parsed.count else { self.error = self.language.text("Duplicate paths prevent reliable item selection."); return }
                 self.entries = parsed
                 self.editRefusal = self.password.isEmpty ? (ArchiveEditor.refusal(archive, listing: result.stdout) ?? "") : "Encrypted archives are read-only in this version."
+                if self.zipEncoding != .auto { self.editRefusal = "Archives using a manual filename encoding are read-only." }
                 let kind = PackageInspector.kind(archive: archive, entries: parsed)
                 if kind == .ipa || kind == .apk { self.editRefusal = "Application packages are read-only." }
                 self.packageKind = kind == .ipa || kind == .apk || ["ipa", "apk"].contains(archive.pathExtension.lowercased()) ? kind : nil
@@ -206,7 +307,11 @@ import ArchiveCore
         } catch { self.error = language.message(error) }
     }
     func cancelInspection() { inspectionTask?.cancel(); inspectionRunner.cancel(); inspectionID = UUID() }
-    func cancelCurrentTask() { exportTask?.cancel(); runner.cancel() }
+    func cancelCurrentTask() {
+        if busy { cancellingTask = true }
+        exportTask?.cancel(); runner.cancel()
+        if let alert = conflictAlert { alert.window.sheetParent?.endSheet(alert.window, returnCode: .abort) }
+    }
     func inspectPackage() {
         showPackage = true
         guard !inspecting, !busy, let archive, packageKind != nil else { return }
@@ -245,6 +350,7 @@ import ArchiveCore
     }
     func performExtraction() {
         guard !busy, let archive else { return }
+        conflictForAll = nil
         let panel = NSOpenPanel(); panel.canChooseDirectories = true; panel.canChooseFiles = false; panel.prompt = language.text("Choose Extraction Location")
         guard panel.runModal() == .OK, let parent = panel.url else { return }
         let destination = extractionNewFolder ? parent.appendingPathComponent(archive.deletingPathExtension().lastPathComponent + "-" + String(UUID().uuidString.prefix(8)), isDirectory: true) : parent
@@ -255,8 +361,9 @@ import ArchiveCore
             try FileManager.default.createDirectory(at: stage, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
             monitorLocation = destination
             showExtraction = false; busy = true; stdout = ""; stderr = ""; status = language.text("Extracting to {0}", destination.lastPathComponent)
+            presentTaskProgress("Extracting")
             let source = session?.workingURL ?? archive, chosen = extractionSelection, secret = password, engine = resolvedSevenZip, engineRunner = runner
-            let policy = extractionPolicy, openFolder = extractionOpenFolder
+            let policy = extractionPolicy, openFolder = extractionOpenFolder, encoding = zipEncoding
             let mobile = packageKind != nil
             exportTask = Task {
                 defer { busy = false; progress = nil; try? FileManager.default.removeItem(at: stage) }
@@ -269,8 +376,9 @@ import ArchiveCore
                             _ = try await PackageExporter.extract(archive: source, destination: stage, selected: chosen, sevenZip: engine, password: secret, runner: engineRunner, update: log)
                         } else {
                             // Keep multi-volume siblings available to the ordinary engine.
-                            let listed = try await engineRunner.run(executable: engine, arguments: ArchiveCommands.list(source, password: secret, using: .sevenZip), password: secret, update: log)
-                            guard !listed.cancelled, listed.status == 0 else { throw ArchiveError.invalid("Reading the archive failed. Check the task log.") }
+                            let listed = try await engineRunner.run(executable: engine, arguments: ArchiveCommands.list(source, password: secret, using: .sevenZip, encoding: encoding), password: secret, update: log)
+                            if listed.cancelled { throw CancellationError() }
+                            guard listed.status == 0 else { throw ArchiveError.invalid("Reading the archive failed. Check the task log.") }
                             let rows = listed.archiveEntries(backend: .sevenZip)
                             let compressed = UInt64((try? source.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
                             _ = try ExtractionSafety.validate(rows, compressedBytes: compressed)
@@ -278,8 +386,9 @@ import ArchiveCore
                             let estimated = try ExtractionSafety.validate(selectedRows)
                             try DiskSpace.requireStaging(estimated, stage: stage, destination: destination)
                             try Task.checkCancellation()
-                            let extracted = try await engineRunner.run(executable: engine, arguments: ArchiveCommands.extract(source, destination: stage, selected: chosen, password: secret, using: .sevenZip), password: secret, diskGuard: stage, update: log)
-                            guard !extracted.cancelled, extracted.status == 0 else { throw ArchiveError.invalid("Extraction failed. Check the task log. The destination was not changed.") }
+                            let extracted = try await engineRunner.run(executable: engine, arguments: ArchiveCommands.extract(source, destination: stage, selected: chosen, password: secret, using: .sevenZip, encoding: encoding), password: secret, diskGuard: stage, update: log)
+                            if extracted.cancelled { throw CancellationError() }
+                            guard extracted.status == 0 else { throw ArchiveError.invalid("Extraction failed. Check the task log. The destination was not changed.") }
                         }
                         await self.updateTaskPhase("Publishing files", fraction: nil)
                         return try await ExtractionMerger.merge(from: stage, to: destination, policy: policy, conflict: { path in
@@ -294,6 +403,8 @@ import ArchiveCore
                     let report = try await withTaskCancellationHandler(operation: { try await work.value }, onCancel: { work.cancel(); engineRunner.cancel() })
                     status = extractionSummary(report)
                     if openFolder { NSWorkspace.shared.open(destination) }
+                } catch is CancellationError {
+                    cancellingTask = true; status = language.text("Cancelled. Completed files may remain in the destination.")
                 } catch { self.error = language.message(error); status = language.text("Export incomplete. Partial files may remain in the destination.") }
             }
         } catch { self.error = language.message(error) }
@@ -303,18 +414,29 @@ import ArchiveCore
     }
     private func updateTaskPhase(_ phase: String, fraction: Double?) { guard busy else { return }; taskPhase = phase; progress = fraction }
     private func askConflict(_ path: String) async -> ConflictChoice {
+        if let conflictForAll { return conflictForAll }
+        if Task.isCancelled { return .cancel }
         let alert = NSAlert(); alert.messageText = language.text("File already exists")
+        alert.showsSuppressionButton = true; alert.suppressionButton?.title = language.text("Apply to all conflicts in this archive")
+        conflictAlert = alert
+        let restoreProgress = progressWindow.isVisible
+        progressWindow.hide() // Do not cover a conflict sheet with the progress panel.
         alert.informativeText = path + "\n" + language.text("Replacing keeps a backup beside the existing file.")
         for title in ["Skip", "Replace", "Rename", "Cancel Task"] { alert.addButton(withTitle: language.text(title)) }
         guard let window = NSApp.windows.first(where: { $0.isVisible && $0.canBecomeMain }) else { return .cancel }
         return await withCheckedContinuation { continuation in
-            alert.beginSheetModal(for: window) { response in
+            alert.beginSheetModal(for: window.attachedSheet ?? window) { response in
+                self.conflictAlert = nil
+                if restoreProgress { self.progressWindow.show() }
+                let choice: ConflictChoice
                 switch response {
-                case .alertFirstButtonReturn: continuation.resume(returning: .skip)
-                case .alertSecondButtonReturn: continuation.resume(returning: .replace)
-                case .alertThirdButtonReturn: continuation.resume(returning: .rename)
-                default: continuation.resume(returning: .cancel)
+                case .alertFirstButtonReturn: choice = .skip
+                case .alertSecondButtonReturn: choice = .replace
+                case .alertThirdButtonReturn: choice = .rename
+                default: choice = .cancel
                 }
+                if alert.suppressionButton?.state == .on { self.conflictForAll = choice }
+                continuation.resume(returning: choice)
             }
         }
     }
@@ -406,6 +528,7 @@ import ArchiveCore
             let engine = options.format == .rar ? rar : resolvedSevenZip, source = inputs, engineRunner = runner
             monitorLocation = selectedOutput.deletingLastPathComponent()
             showCreate = false; busy = true; stdout = ""; stderr = ""; status = language.text("Create Archive")
+            presentTaskProgress("Create Archive")
             exportTask = Task {
                 defer { busy = false; progress = nil }
                 do {
@@ -417,7 +540,7 @@ import ArchiveCore
                     let output = try await withTaskCancellationHandler(operation: { try await work.value }, onCancel: { work.cancel(); engineRunner.cancel() })
                     status = language.text("{0} · Done", language.text("Create Archive"))
                     NSWorkspace.shared.activateFileViewerSelecting([output])
-                } catch is CancellationError { status = language.text("Cancelled. No unfinished archive was published.") }
+                } catch is CancellationError { cancellingTask = true; status = language.text("Cancelled. No unfinished archive was published.") }
                 catch { self.error = language.message(error); status = language.text("Creation failed. No unfinished archive was published.") }
             }
         } catch { self.error = language.message(error) }
@@ -450,6 +573,7 @@ import ArchiveCore
     func launch(_ title: String, executable: String, args: [String], directory: URL? = nil, secret: String = "", preparing: URL? = nil, verification: [String]? = nil, completion: @escaping () -> Void = {}, success: @escaping (CLIResult) -> Void = { _ in }) {
         guard !busy else { return }
         busy = true; progress = nil; stdout = ""; stderr = ""; status = title
+        if ["a", "x", "t"].contains(args.first ?? "") { presentTaskProgress(title) }
         exportTask = Task {
             defer { busy = false; progress = nil; completion() }
             do {
@@ -459,7 +583,7 @@ import ArchiveCore
                     session = try await ArchiveSession.prepare(preparing, sevenZip: executable, runner: runner) { a, b in
                         Task { @MainActor in self.stdout = String(a.suffix(200_000)); self.stderr = String(b.suffix(100_000)) }
                     }
-                    actualArgs = try ArchiveCommands.list(session!.workingURL, password: secret, using: .sevenZip)
+                    actualArgs = try ArchiveCommands.list(session!.workingURL, password: secret, using: .sevenZip, encoding: zipEncoding)
                 }
                 let result = try await runner.run(executable: executable, arguments: actualArgs, directory: directory, password: secret) { a, b in
                     Task { @MainActor in
@@ -467,7 +591,7 @@ import ArchiveCore
                     }
                 }
                 stdout = String(result.stdout.suffix(200_000)); stderr = String(result.stderr.suffix(100_000))
-                if result.cancelled { status = language.text("Cancelled. Partial output may remain; check the destination.") }
+                if result.cancelled { cancellingTask = true; status = language.text("Cancelled. Partial output may remain; check the destination.") }
                 else if result.status == 0 {
                     if let verification {
                         status = language.text("Test After Archiving")

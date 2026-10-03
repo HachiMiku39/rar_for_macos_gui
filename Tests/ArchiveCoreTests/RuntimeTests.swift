@@ -41,6 +41,19 @@ final class RuntimeTests: XCTestCase {
         let measured = Double(end.cpuNanoseconds - start.cpuNanoseconds) / 1e9
         XCTAssertEqual(measured, after - before, accuracy: max(0.02, (after - before) * 0.15))
     }
+    func testCPUCapacityAndActivityMonitorScales() {
+        var sampler = ResourceSampler()
+        let initial = ResourceCounters(cpuNanoseconds: 0, memory: 1, read: 0, written: 0)
+        XCTAssertNil(sampler.sample(["app": initial], at: 0, logicalCPUCount: 8).cpuCapacityPercent)
+        let busy = ResourceCounters(cpuNanoseconds: 4_000_000_000, memory: 1, read: 0, written: 0)
+        let sample = sampler.sample(["app": busy], at: 2, logicalCPUCount: 8)
+        XCTAssertEqual(sample.cpuPercent, 200) // Activity Monitor must not be capped at 100%.
+        XCTAssertEqual(sample.cpuCapacityPercent, 25)
+        let joined = sampler.sample(["app": busy, "helper": busy], at: 3, logicalCPUCount: 8)
+        XCTAssertEqual(joined.cpuCapacityPercent, 0) // A newly launched helper has no baseline yet.
+        let invalid = sampler.sample(["app": busy], at: 4, logicalCPUCount: 0)
+        XCTAssertNil(invalid.cpuCapacityPercent)
+    }
     func testImplicitDirectoryCollisionsAndBoundedPackRead() throws {
         func file(_ path: String) -> ArchiveEntry { .init(path: path, size: "1", modified: "", isDirectory: false, isLink: false) }
         XCTAssertThrowsError(try ExtractionSafety.validate([file("A/a.txt"), file("a/b.txt")]))

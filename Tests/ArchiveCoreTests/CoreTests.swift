@@ -24,7 +24,7 @@ final class CoreTests: XCTestCase {
         try Data("hello, advanced options".utf8).write(to: source.appendingPathComponent("Keep.txt"))
         try Data("excluded".utf8).write(to: source.appendingPathComponent("Skip.tmp"))
         let runner = CLIRunner(), secret = "test-only-password"
-        for format in CreationFormat.allCases {
+        for format in CreationFormat.allCases where !format.isTar {
             var o = CreationOptions()
             o.format = format; o.level = 4; o.dictionaryMB = 4; o.solid = true
             o.blake2 = true; o.quickOpen = 2; o.threads = 2; o.exclusions = "*.tmp"

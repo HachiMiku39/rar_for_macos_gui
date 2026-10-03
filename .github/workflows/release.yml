@@ -1,0 +1,43 @@
+name: Build and publish beta
+on:
+  push:
+    branches: [main]
+    paths: [release-version.txt, '.github/workflows/release.yml']
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: archivedesk-release
+  cancel-in-progress: false
+jobs:
+  release:
+    runs-on: macos-26
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Validate version and toolchain
+        run: |
+          version=$(tr -d '\n\r' < release-version.txt)
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+-beta\.[0-9]+$ ]]
+          echo "RELEASE_VERSION=$version" >> "$GITHUB_ENV"
+          xcodebuild -version
+      - name: Build helper and test core
+        run: |
+          bash scripts/build-zip-helper.sh
+          ARCHIVEDESK_TEST_7ZZ="$PWD/Resources/Tools/7zz" ARCHIVEDESK_TEST_ZIP_HELPER="$PWD/Resources/Tools/ArchiveDeskZIP" swift test
+      - name: Package Universal app
+        run: bash scripts/package.sh
+      - name: Source archive and checksums
+        run: |
+          git archive --format=zip --prefix=ArchiveDesk/ HEAD -o "dist/ArchiveDesk-${RELEASE_VERSION}-source.zip"
+          cd dist
+          shasum -a 256 "ArchiveDesk-${RELEASE_VERSION}-universal.dmg" "ArchiveDesk-${RELEASE_VERSION}-universal.zip" "ArchiveDesk-${RELEASE_VERSION}-source.zip" > "ArchiveDesk-${RELEASE_VERSION}-SHA256SUMS.txt"
+          hdiutil verify "ArchiveDesk-${RELEASE_VERSION}-universal.dmg"
+          unzip -tq "ArchiveDesk-${RELEASE_VERSION}-universal.zip"
+      - name: Publish prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "v${RELEASE_VERSION}" dist/* --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "ArchiveDesk ${RELEASE_VERSION}" --notes-file docs/RELEASE-1.0-beta.3.md --prerelease

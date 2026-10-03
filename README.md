@@ -1,97 +1,73 @@
-# ArchiveDesk · RAR for macOS GUI
+# ArchiveDesk · 1.0 beta
 
-原生 SwiftUI 压缩包管理器，支持 macOS 14+，同时支持 Apple Silicon 和 Intel。
+macOS 原生归档管理器，支持 macOS 14+、Apple Silicon 和 Intel。使用 SwiftUI 界面和独立命令行引擎，不自行实现 RAR 编解码。
 
 ## 安装
 
-在 [Releases](https://github.com/HachiMiku39/rar_for_macos_gui/releases) 下载 `ArchiveDesk-0.9.0-universal.dmg`（预发布版），打开后把 **ArchiveDesk** 拖到 **Applications**。
+打开 `ArchiveDesk-1.0.0-beta.3-universal.dmg`，把 ArchiveDesk 拖到 Applications。发布版本见 [Releases](https://github.com/HachiMiku39/rar_for_macos_gui/releases)。
 
-这是未经 Developer ID 签名和公证的原型版本。如果 macOS 阻止打开，请优先用下方源码在 Xcode 中构建；不需要关闭系统安全保护。
+**beta.3：** 修复 Dock 图标的启动加载；CPU 主指标改为本软件占整机逻辑核心的比例（0–100%），另列活动监视器口径的进程 CPU（单核心满载为 100%，多核可超过 100%）。两项均统计 ArchiveDesk + 当前引擎，不包括其他应用。更新时先退出旧版本，再替换 Applications 中的应用。
 
-## 0.9：进度与资源监控（预发布版）
+这是 **Beta、未经过 Developer ID 签名和公证** 的构建。如果 macOS 阻止打开，可用 Xcode 从源码构建；不需要关闭系统安全保护。本地候选包与 GitHub 发布状态分别管理。
 
-- 压缩／解压／校验显示引擎报告的当前阶段百分比；写入目标文件阶段按已处理字节显示进度。未知进度显示活动条，不伪造总进度。
-- CPU、RAM、进程磁盘读写速率每 0.5 秒采样；同时显示目标卷已用／剩余空间和经过时间。CPU 100% = 一个核心，统计范围为 ArchiveDesk＋当前引擎；进程 I/O 不是物理磁盘繁忙率，缓存读取可能为零。
-- 创建压缩包改为私有目录暂存，成功（以及可选校验）后发布；取消／失败不留下最终名称的半成品。单文件流式复制提交，分卷整体提交到新文件夹。
-- 修复关闭输出管道后的空转、取消与输出提交之间的竞态、同盘双份空间预检、隐含目录的大小写／Unicode 冲突，以及已导入语言包启动读取未限额的问题。
+## 1.0 beta 新功能
 
-具体审查结果、商业软件参考和限制见 [0.9 审查与监控说明](docs/REVIEW-0.9.md)。本版没有宣称完成安全沙箱、100 GB 压力验证、暂停／恢复或设备级磁盘利用率监控。
+**beta.2 修复：** 压缩、解压、批量解压及归档测试开始时自动打开独立进度窗口，显示阶段百分比、CPU、RAM、磁盘读写速度、目标卷占用、用时及取消。任务结束保留结果；关闭窗口只隐藏，可从“工具 → 任务进度”或主窗口底部再次打开。不再仅依赖可能被弹层挡住的底部面板。
 
-## 0.7 新增
+- **批量解压与队列**：拖入多个压缩包，或“工具 → 批量解压”。逐个解压到同名目录；失败继续后续任务，支持排序、移除、取消整队。分卷只选首卷。
+- **应用到全部**：覆盖询问可将跳过、替换、重命名应用到当前压缩包的全部冲突。替换仍保留原文件旁置备份。
+- **SHA-256 / MD5 面板**：工具 → 文件校验；流式计算、复制、粘贴预期值比对，以及导入 GNU 格式校验清单。MD5 仅用于旧值兼容，不作安全认证。
+- **原生 Quick Look**：选中文件 → 工具／右键 → 快速查看。文件名列支持把单个普通文件拖到 Finder。均先安全提取临时副本，上限 512 MiB，不支持文件夹拖出或嵌套归档预览。
+- **旧 ZIP 文件名编码**：Auto、UTF-8、GB18030、GBK、CP932、Big5、CP437、CP949。手动选择会重新读取列表；解压使用同一编码。该模式暂时只读，不编辑原包。
+- **创建 TAR、tar.gz、tar.xz**：保留普通 Unix 权限、执行位、修改时间。此类创建不带密码、分卷、ACL 或扩展属性。
+- **自定义分卷**：RAR5 / ZIP / 7z，1–4096 MiB，可输入 MiB 或 GiB，最大 4 GiB。分卷保存到新文件夹；ZIP 使用 7-Zip 的 `.zip.001` 分割形式，不是传统 `.z01`。FAT32 目标请选不超过 4095 MiB。
 
-- **编辑压缩包**：向根目录添加文件/文件夹、删除选中项及子项、重命名单个文件。支持未加密、单卷 RAR/ZIP/7z；RAR 编辑需要官方 rar。
-- **保护原包**：在副本上修改、测试及核对结果；保留原包备份后再替换。失败或提交前取消不替换原包。
-- **解压选项**：新建子文件夹或合并到已有目录；覆盖前询问、跳过、自动重命名、覆盖、更新较旧文件；可选择完成后打开文件夹。
-- 被覆盖的文件保留旁置备份；显示写入、跳过、重命名、备份数量；覆盖询问使用异步窗口。
-- 修复无密码 RAR 创建时错误使用 `-p-`（可能被视为字面密码 `-`）的问题。
+详细行为与限制：[1.0 beta 说明](docs/BETA-1.0.md)。
 
-暂不编辑加密包、分卷、IPA/APK，不支持文件夹重命名。编辑仍限制单文件 512 MiB、总计 2 GiB、50000 项；普通解压在 0.8 已拆分为独立资源限制。详见 [编辑与解压说明](docs/EDITING-EXTRACTION.md)。
+## 已有功能
 
-## 0.8：可靠性改造第一阶段
+- 内置 7-Zip，浏览、解压、测试 RAR / ZIP / 7z / TAR / ISO 等；支持密码、选中项解压、文件夹导航与类型图标。
+- RAR5 / ZIP / 7z 创建、压缩级别、排除规则、压缩后测试；RAR5 / 7z 文件名加密、RAR 恢复记录与恢复卷。
+- 向未加密单卷 RAR / ZIP / 7z 添加、删除、重命名文件；在副本上修改并保留原包备份。编辑有容量限制。
+- IPA / APK 结构、元数据及保护状态检查；不解密、脱壳、运行程序或绕过 DRM。
+- 阶段进度、CPU、RAM、进程磁盘读写速率、目标卷空间、任务日志和取消。未知进度显示活动条，不伪造百分比。
+- English / 简体中文 / 日本語，英语源语言与回退；可导入 JSON 语言包。支持系统／浅色／深色外观，系统支持时使用 Liquid Glass。
 
-- 替换会抛出 Objective-C 异常的进程启动边界；无效引擎、目录、参数和启动失败返回任务错误，支持取消与重复使用。
-- 有界日志、流式目录解析、普通解压解除 2 GiB / 512 MiB 旧限制；后台分页准备目录内容。
-- 内存预算（自适应／保守／性能）、内存压力与磁盘空间监测；失败安全停止。
-- 文件先写隐藏临时文件，成功后发布；保留普通 Unix 权限、执行位及修改时间。取消保留已完成文件，不发布当前未完成文件。
-- Ghidra 实包完整解压、5 GiB ZIP64、22 万条目索引已验证。详见 [已实现范围与后续路线](docs/RELIABILITY.md)。尚不宣称 100 GB 全场景达标、安全链接还原或完整动态任务调度。
-
-## 0.6 新增
-
-- IPA／APK 结构识别、浏览、全部／选中解压；不执行包内程序，不解密或脱壳。
-- 按需后台检查：IPA Bundle 元数据、逐 Mach-O／架构的加密标记；APK 包名、版本、SDK、ABI、DEX 和有限加固特征提示。
-- 处理 APK 大小写冲突文件名，重命名导出并生成路径映射，避免 macOS 上静默漏文件。
-- 使用用户提供的新图标。新增文字继续支持中、英、日三语。
-
-检查与导出边界见 [IPA／APK 使用说明](docs/MOBILE-PACKAGES.md)。未检测到标记不等于已脱壳或无保护。
-
-## 0.5 新增
-
-创建窗口按常规、安全与恢复、文件、高级与时间分组。新增 ZIP/7z 创建、六档压缩等级、固实压缩、RAR 字典/BLAKE2/快速打开信息/时间设置、排除规则、线程上限和压缩后测试。可保存不含密码的默认配置。
-
-[WinRAR 功能取舍与对应表](docs/WINRAR-FEATURES.md)
-
-## 功能
-
-- 内置 7-Zip：浏览、解压、测试 RAR、ZIP、7z、TAR、ISO 等，无需安装命令行工具。
-- 支持密码、多选解压、拖放、Finder“打开方式”、任务日志和取消。
-- RAR5 创建、文件名加密、分卷与恢复数据：需另行安装 RARLAB 工具。
-- 简体中文 / English / 日本語，可在设置中即时切换；支持导入 JSON 语言包。
-- 文件类型列与彩色分类图标；双击文件夹进入、上一级/根目录导航，搜索当前目录及子目录。
-- 双击图片、视频、音频、PDF、文本或办公文档，以临时副本交给默认应用打开（需确认，单文件上限 512 MB）。不支持嵌套压缩包、可执行程序和脚本；编辑不会写回原包，退出时清理临时副本。异常退出可能留下系统临时文件，不应视为安全擦除。
-- 一键清除最近记录（侧栏与 macOS 最近文稿），不删除原文件。
-- macOS 26/27 原生 Liquid Glass 导航和操作区；日间、夜间或跟随系统，macOS 14/15 使用材质背景降级。
-
-**RAR 下载：** 设置 →“下载 RAR for macOS”，或访问 [RARLAB 官网](https://www.rarlab.com/download.htm)。选择 ARM（Apple Silicon）或 x64（Intel），解包后在设置中选择 `rar` 文件。RAR 创建器没有捆绑，使用与分发须遵守 [RARLAB 许可](https://www.rarlab.com/license.htm)。
+**RAR 创建工具不捆绑。** 设置 → 下载 RAR for macOS，或访问 [RARLAB](https://www.rarlab.com/download.htm)，解包后选择 `rar` 路径；遵守其许可。ZIP、7z、TAR 创建无需 RAR。
 
 ## 从源码构建
 
-用 Xcode 26+（推荐 Xcode 27）打开 `ArchiveDesk.xcodeproj`，选择 **ArchiveDesk → My Mac**，运行。内置引擎、语言文件和许可会自动打包。
+用 Xcode 26+（推荐 Xcode 27）打开 `ArchiveDesk.xcodeproj`，选择 ArchiveDesk → My Mac 运行。工程自动编译 Universal ZIP 编码适配器并打包资源。没有 Homebrew 运行依赖。
 
 ```sh
 xcodebuild -project ArchiveDesk.xcodeproj -scheme ArchiveDesk \
   -configuration Release -derivedDataPath .build-xcode CODE_SIGNING_ALLOWED=NO build
 ```
 
-核心测试：`swift test`。真实解压测试可设置 `ARCHIVEDESK_TEST_RAR` 和 `ARCHIVEDESK_TEST_7ZZ` 为工具的绝对路径；未设置时相应测试会跳过。
+`scripts/package.sh` 构建 Universal 安装包。Swift Package 主要用于核心测试：
 
-## 语言包 Demo
+```sh
+sh scripts/build-zip-helper.sh
+ARCHIVEDESK_TEST_7ZZ="$PWD/Resources/Tools/7zz" \
+ARCHIVEDESK_TEST_ZIP_HELPER="$PWD/Resources/Tools/ArchiveDeskZIP" swift test
+```
 
-设置 →“查看本地化示例”，然后导入 `fr-demo.json`，可体验部分法语翻译，缺失文字自动回退英语。
+可选 `ARCHIVEDESK_TEST_RAR`、`ARCHIVEDESK_TEST_GHIDRA` 为测试工具／样本绝对路径，`ARCHIVEDESK_TEST_LARGE=1` 启用 5 GiB ZIP64 测试。未提供相应工具或私人样本时跳过对应测试，不下载样本。
 
-制作完整语言包：复制 [en-template.json](Resources/LocalizationDemo/en-template.json)，修改 `id/name/locale`，只翻译 `strings` 的值，保留英文原文键和 `{0}` 等占位符。0.5.1 使用 schema v2，明确 `sourceLanguage: "en"`；英语是源语言、缺失翻译的回退语言及全新安装默认语言。保留现有语言选择，并兼容旧中文键 v1 语言包；新版 Demo 需要 0.5.1+。详见 [语言包接口说明](Resources/LocalizationDemo/README.md)。
+## 本地化
 
-## English
+复制 [英文模板](Resources/LocalizationDemo/en-template.json)，修改语言信息，只翻译 `strings` 的值，保留英文键与占位符，再从设置导入。内置 [法语 Demo](Resources/LocalizationDemo/fr-demo.json) 为部分翻译，缺失文字回退英语。[语言包说明](Resources/LocalizationDemo/README.md)。
 
-Native macOS archive manager with a bundled extraction engine. Download the DMG from Releases and drag ArchiveDesk to Applications. Switch the interface language in Settings. RAR creation requires a separately licensed [RARLAB CLI](https://www.rarlab.com/download.htm). Open `ArchiveDesk.xcodeproj` to build. JSON language packs can be imported in Settings; missing translations fall back to English.
+## 边界与许可
 
-## 日本語
+Beta 尚无安全沙箱、暂停／断点续传、Finder 右键扩展、文件夹拖出或 100 GB 全场景验证。一般解压拒绝链接、特殊文件及大小写／Unicode 路径冲突；不承诺所有格式变体可用。取消可能保留已经完成的文件；临时文件清理不是安全擦除。不要将它当作已通过安全审计的恶意文件分析环境。
 
-展開エンジンを内蔵した macOS ネイティブのアーカイブ管理アプリです。Releases の DMG を開き、ArchiveDesk を Applications にドラッグしてください。設定で言語を変更できます。RAR の作成には、別途ライセンスを取得した [RARLAB CLI](https://www.rarlab.com/download.htm) が必要です。JSON 言語パックの読み込みにも対応しています。
+7-Zip 26.03 的许可和完整对应源码在 [Resources/ThirdParty](Resources/ThirdParty)。手动 ZIP 编码通过独立适配器调用系统 libarchive；不打包系统库。项目与 RARLAB / WinRAR 无隶属关系。
 
-## 注意点・许可
+[验证记录](VALIDATION.md) · [WinRAR 功能对应](docs/WINRAR-FEATURES.md) · [可靠性边界](docs/RELIABILITY.md) · [IPA/APK](docs/MOBILE-PACKAGES.md)
 
-原型尚无 Finder 右键扩展、修复向导或 App Sandbox。不同格式的所有变体不保证兼容；当前不支持 ACE、LZIP。系统对话框及原始 CLI 日志可能使用系统或工具语言。请勿用本原型处理不可信的恶意归档。
+## English / 日本語
 
-7-Zip 26.03 以独立进程运行，原始许可、LGPL 文本和对应完整源码位于 [Resources/ThirdParty](Resources/ThirdParty)。本项目与 RARLAB / WinRAR 无隶属关系。
+Native macOS archive manager with batch extraction, checksums, Quick Look, legacy ZIP encodings and TAR creation. Unsigned Universal beta; RAR creation requires a separately acquired RARLAB CLI. Switch languages in Settings.
 
-[测试记录](VALIDATION.md) · [技术说明](docs/TECHNICAL.md)
+一括展開、チェックサム、Quick Look、旧 ZIP 文字コード、TAR 作成に対応した macOS ネイティブアプリです。未署名の Universal ベータ版です。RAR 作成には別途 RARLAB CLI が必要です。

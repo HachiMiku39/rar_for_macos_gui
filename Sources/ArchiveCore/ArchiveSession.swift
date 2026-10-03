@@ -266,6 +266,30 @@ public enum ArchiveCreator {
         try fm.createDirectory(at: stage, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
         defer { try? fm.removeItem(at: stage) }
         let staged = stage.appendingPathComponent(output.lastPathComponent)
+        if options.format.isTar {
+            let tar = options.format == .tar ? staged : stage.appendingPathComponent(output.deletingPathExtension().lastPathComponent)
+            var tarOptions = options; tarOptions.format = .tar
+            let tarArgs = try ArchiveCommands.create(output: tar, inputs: inputs, password: "", headers: false, volumeMB: 0, recovery: 0, options: tarOptions)
+            func require(_ result: CLIResult) throws {
+                if result.cancelled || Task.isCancelled { throw CancellationError() }
+                guard result.status == 0 else { throw ArchiveError.invalid("TAR creation or verification failed. Check the task log.") }
+            }
+            phase("Creating TAR", nil)
+            try require(try await runner.run(executable: "/usr/bin/tar", arguments: tarArgs, directory: inputs.first?.deletingLastPathComponent(), diskGuard: stage, update: update))
+            if options.format != .tar {
+                phase("Compressing", nil)
+                let type = options.format == .tarGzip ? "gzip" : "xz"
+                try require(try await runner.run(executable: executable, arguments: ["a", "-t" + type, "-mx=\([0,1,3,5,7,9][options.level])", "-bsp2", "--", staged.path, tar.lastPathComponent], directory: stage, diskGuard: stage, update: update))
+            }
+            if options.testAfter {
+                phase("Verifying", nil)
+                try require(try await runner.run(executable: executable, arguments: ArchiveCommands.test(tar, password: "", using: .sevenZip), diskGuard: stage, update: update))
+                if options.format != .tar { try require(try await runner.run(executable: executable, arguments: ArchiveCommands.test(staged, password: "", using: .sevenZip), diskGuard: stage, update: update)) }
+            }
+            try Task.checkCancellation(); phase("Publishing files", nil)
+            _ = try ExtractionSafety.copyVerifiedFile(staged, to: output, replacing: false) { done, total in phase("Publishing files", total > 0 ? Double(done) / Double(total) : nil) }
+            return output
+        }
         var creationOptions = options
         creationOptions.testAfter = false // Verification is a separate visible phase, not a duplicate RAR -t pass.
         let args = try ArchiveCommands.create(output: staged, inputs: inputs, password: password, headers: headers,

@@ -1,7 +1,7 @@
 import Foundation
 import Darwin
 
-public struct ArchiveEntry: Identifiable, Hashable {
+public struct ArchiveEntry: Identifiable, Hashable, Sendable {
     public var id: String { path }
     public let path: String
     public let size: String
@@ -24,7 +24,8 @@ public enum ArchiveError: LocalizedError {
 public enum Backend { case rar, sevenZip }
 
 public enum CreationFormat: String, Codable, CaseIterable {
-    case rar, zip, sevenZip = "7z"
+    case rar, zip, sevenZip = "7z", tar, tarGzip = "tar.gz", tarXZ = "tar.xz"
+    public var isTar: Bool { [.tar, .tarGzip, .tarXZ].contains(self) }
     public var title: String { self == .rar ? "RAR5" : rawValue.uppercased() }
 }
 
@@ -169,23 +170,23 @@ public enum ArchiveCommands {
     public static func literalSelection(_ paths: [String]) throws {
         guard paths.allSatisfy({ safePath($0) && !$0.contains("*") && !$0.contains("?") && !$0.hasPrefix("@") }) else { throw ArchiveError.invalid("This item contains wildcard characters or an unsafe path and cannot be safely extracted by selection.") }
     }
-    public static func list(_ archive: URL, password: String, using engine: Backend? = nil) throws -> [String] {
+    public static func list(_ archive: URL, password: String, using engine: Backend? = nil, encoding: ZIPNameEncoding = .auto) throws -> [String] {
         let p = try passwordSwitch(password)
-        return (engine ?? backend(archive)) == .rar ? ["lt", "-cfg-", "-idc", p, "--", archive.path] : ["l", "-slt", "-sccUTF-8", "--", archive.path]
+        return (engine ?? backend(archive)) == .rar ? ["lt", "-cfg-", "-idc", p, "--", archive.path] : ["l", "-slt", "-sccUTF-8"] + encoding.switches(for: archive) + ["--", archive.path]
     }
-    public static func extract(_ archive: URL, destination: URL, selected: [String], password: String, using engine: Backend? = nil) throws -> [String] {
+    public static func extract(_ archive: URL, destination: URL, selected: [String], password: String, using engine: Backend? = nil, encoding: ZIPNameEncoding = .auto) throws -> [String] {
         try literalSelection(selected)
         let p = try passwordSwitch(password)
         if (engine ?? backend(archive)) == .rar { return ["x", "-cfg-", "-o-", "-ol-", "-idc", p, "--", archive.path] + selected + [destination.path + "/"] }
-        return ["x", "-aos", "-bsp2", "-sccUTF-8", "-o" + destination.path] + resourceSwitches(archive) + ["--", archive.path] + selected
+        return ["x", "-aos", "-bsp2", "-sccUTF-8", "-o" + destination.path] + encoding.switches(for: archive) + resourceSwitches(archive) + ["--", archive.path] + selected
     }
     public static func test(_ archive: URL, password: String, using engine: Backend? = nil) throws -> [String] {
         let p = try passwordSwitch(password)
         return (engine ?? backend(archive)) == .rar ? ["t", "-cfg-", "-idc", p, "--", archive.path] : ["t", "-bsp2", "-sccUTF-8"] + resourceSwitches(archive) + ["--", archive.path]
     }
     public static func create(output: URL, inputs: [URL], password: String, headers: Bool, volumeMB: Int, recovery: Int, options: CreationOptions = CreationOptions()) throws -> [String] {
-        guard !inputs.isEmpty, (0...1_000_000).contains(volumeMB), (0...100).contains(recovery) else { throw ArchiveError.invalid("Select files; volume size must be 0–1000000 MB and recovery record 0–100%.") }
-        guard !FileManager.default.fileExists(atPath: output.path), output.pathExtension.lowercased() == options.format.rawValue else { throw ArchiveError.invalid("Choose a new filename with the correct extension for the selected format.") }
+        guard !inputs.isEmpty, (0...4096).contains(volumeMB), (0...100).contains(recovery) else { throw ArchiveError.invalid("Select files; volume size must be 0–4096 MiB and recovery record 0–100%.") }
+        guard !FileManager.default.fileExists(atPath: output.path), output.lastPathComponent.lowercased().hasSuffix("." + options.format.rawValue) else { throw ArchiveError.invalid("Choose a new filename with the correct extension for the selected format.") }
         guard inputs.allSatisfy({ !$0.path.contains("\n") && !$0.path.contains("\r") && !$0.lastPathComponent.contains("*") && !$0.lastPathComponent.contains("?") }) else { throw ArchiveError.invalid("Source names contain unsupported newlines or wildcards.") }
         let parents = Set(inputs.map { $0.deletingLastPathComponent().path })
         guard parents.count == 1 else { throw ArchiveError.invalid("Source items must share one parent folder. You may select their common parent folder instead.") }
@@ -196,6 +197,12 @@ public enum ArchiveCommands {
         }
         let patterns = try options.validatedPatterns()
         _ = try passwordSwitch(password)
+        if options.format.isTar {
+            guard password.isEmpty, volumeMB == 0, recovery == 0 else { throw ArchiveError.invalid("TAR creation does not support passwords, recovery records or split volumes.") }
+            // bsdtar interprets @archive operands even after --. Refuse that special syntax.
+            guard inputs.allSatisfy({ !$0.lastPathComponent.hasPrefix("@") }) else { throw ArchiveError.invalid("TAR source names must not begin with @.") }
+            return ["-cf", output.path, "--format", "pax", "--no-mac-metadata", "--no-xattrs", "--no-acls"] + patterns.map { "--exclude=" + $0 } + ["--"] + inputs.map(\.lastPathComponent)
+        }
         if options.format != .rar {
             var args = ["a", "-t" + options.format.rawValue, "-mx=\([0,1,3,5,7,9][options.level])", "-sccUTF-8", "-bsp2"]
             if !password.isEmpty {
