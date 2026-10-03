@@ -2,7 +2,7 @@ name: Build and publish beta # Swift 6.2+ / Xcode 26 compatibility
 on:
   push:
     branches: [main]
-    paths: [release-version.txt, '.github/workflows/release.yml']
+    paths: [release-version.txt, scripts/package.sh, '.github/workflows/release.yml']
   workflow_dispatch:
 permissions:
   contents: write
