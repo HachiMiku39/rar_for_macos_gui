@@ -20,6 +20,9 @@ struct ContentView: View {
                     Text(language.text("{0} items", String(model.entries.count))).foregroundStyle(.secondary)
                 }.padding(12)
                 if model.archive != nil { navigationBar }
+                if model.archive != nil && !model.editRefusal.isEmpty {
+                    Text(language.text(model.editRefusal)).font(.caption).foregroundStyle(.secondary).padding(.horizontal, 14)
+                }
                 if let kind = model.packageKind {
                     HStack {
                         Label(language.text(kind.rawValue), systemImage: kind == .ipa ? "iphone" : "apps.iphone")
@@ -42,6 +45,9 @@ struct ContentView: View {
                     }.frame(maxHeight: .infinity)
                 } else {
                     entryTable
+                    if model.visible.count < model.visibleTotal {
+                        Button(language.text("Show more items ({0} of {1})", String(model.visible.count), String(model.visibleTotal))) { model.showMoreRows() }.padding(6)
+                    }
                 }
                 Divider()
                 HStack {
@@ -72,6 +78,11 @@ struct ContentView: View {
                 Button { model.extract(selected: true) } label: { Label(language.text("Extract Selected"), systemImage: "checklist") }.disabled(model.selection.isEmpty)
                 Button { model.test() } label: { Label(language.text("Test"), systemImage: "checkmark.shield") }.disabled(model.archive == nil)
                 Menu {
+                    Button(language.text("Add to Archive…")) { model.addToArchive() }
+                    Button(language.text("Delete from Archive…")) { model.deleteFromArchive() }.disabled(model.selection.isEmpty)
+                    Button(language.text("Rename in Archive…")) { model.renameInArchive() }.disabled(model.selectedEntry == nil || model.selectedEntry?.isDirectory == true)
+                } label: { Label(language.text("Edit Archive"), systemImage: "square.and.pencil") }.disabled(!model.canEdit)
+                Menu {
                     Button(language.text("Add 3% Recovery Record…")) { model.recovery("rr3p") }
                     Button(language.text("Create 10% Recovery Volumes…")) { model.recovery("rv10p") }
                 } label: { Label(language.text("Recovery Data"), systemImage: "cross.case") }.disabled(model.archive?.pathExtension.lowercased() != "rar")
@@ -91,6 +102,7 @@ struct ContentView: View {
         }
         .dropDestination(for: URL.self) { urls, _ in guard !model.busy else { return false }; model.receive(urls); return true }
         .sheet(isPresented: $model.showCreate) { CreateView().environmentObject(model) }
+        .sheet(isPresented: $model.showExtraction) { ExtractionOptionsView().environmentObject(model).environmentObject(language) }
         .sheet(isPresented: $model.showPackage) { PackageInspectionView().environmentObject(model).environmentObject(language) }
         .alert(language.text("Operation Unsuccessful"), isPresented: Binding(get: { model.error != nil }, set: { if !$0 { model.error = nil } })) { Button(language.text("OK")) { model.error = nil } } message: { Text(language.text(model.error ?? "")) }
         .frame(minWidth: 900, minHeight: 600)
@@ -115,6 +127,9 @@ struct ContentView: View {
                 else { ProgressView().controlSize(.small) }
             }
             Text(language.text(model.status)).font(.caption).lineLimit(2)
+            if let task = model.engineTask, model.busy, task.state == .running {
+                Text(language.text(task.state.rawValue)).font(.caption).foregroundStyle(.secondary)
+            }
             Spacer()
             if model.busy { Button(language.text("Cancel Task")) { model.cancelCurrentTask() } }
         }.padding(10).background(.bar)
@@ -141,6 +156,9 @@ struct ContentView: View {
                 if let item = model.visible.first(where: { ids.contains($0.id) }) { model.activate(item) }
             }.disabled(ids.count != 1 || model.busy || model.visible.contains { ids.contains($0.id) && $0.category == "Archive" })
             Button(language.text("Extract Selected…")) { model.selection = ids; model.extract(selected: true) }.disabled(ids.isEmpty || model.busy)
+            Divider()
+            Button(language.text("Delete from Archive…")) { model.selection = ids; model.deleteFromArchive() }.disabled(!model.canEdit || ids.isEmpty)
+            Button(language.text("Rename in Archive…")) { model.selection = ids; model.renameInArchive() }.disabled(!model.canEdit || ids.count != 1 || model.visible.contains { ids.contains($0.id) && $0.isDirectory })
         } primaryAction: { ids in
             if ids.count == 1, let item = model.visible.first(where: { ids.contains($0.id) }) { model.activate(item) }
         }
@@ -176,6 +194,29 @@ struct ContentView: View {
             Text(title).font(.caption).foregroundStyle(.secondary)
             ScrollView([.vertical, .horizontal]) { Text(text.isEmpty ? "—" : text).font(.system(size: 11, design: .monospaced)).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading) }
         }.padding(10).frame(minWidth: 180, maxWidth: .infinity)
+    }
+}
+
+struct ExtractionOptionsView: View {
+    @EnvironmentObject var model: Model
+    @EnvironmentObject var language: AppLanguage
+    @Environment(\.dismiss) var dismiss
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            Text(language.text("Extraction Options")).font(.title2)
+            Toggle(language.text("Create a new subfolder"), isOn: $model.extractionNewFolder)
+            Picker(language.text("When files already exist"), selection: $model.extractionPolicy) {
+                ForEach(ExtractionPolicy.allCases, id: \.self) { Text(language.text($0.rawValue)).tag($0) }
+            }.disabled(model.extractionNewFolder)
+            Text(language.text("Update mode adds missing files and replaces existing files only when the extracted copy is newer. Replaced files are kept as backups. Folder/file conflicts and links are refused.")).font(.caption).foregroundStyle(.secondary)
+            Toggle(language.text("Open destination after extraction"), isOn: $model.extractionOpenFolder)
+            Text(language.text("Files are staged and checked by the engine before publication (CRC where available). Cancellation keeps completed files but removes the current partial file. General archives are limited by disk space and index memory; package inspection has separate limits.")).font(.caption).foregroundStyle(.secondary)
+            HStack {
+                Spacer()
+                Button(language.text("Cancel")) { dismiss() }.keyboardShortcut(.cancelAction)
+                Button(language.text("Choose Extraction Location")) { model.performExtraction() }.buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction)
+            }
+        }.padding(24).frame(width: 530)
     }
 }
 
@@ -348,6 +389,10 @@ struct SettingsView: View {
             }
             Text(language.text("Language packs contain text only; missing entries fall back to English. System dialogs and raw CLI logs may use the system or tool language.")).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             Divider()
+            Picker(language.text("Memory Usage"), selection: $model.memoryMode) {
+                ForEach(MemoryMode.allCases, id: \.self) { Text(language.text($0.rawValue)).tag($0) }
+            }
+            Text(language.text("Budgets are ceilings, not preallocated RAM. Critical memory pressure or low disk space stops the task safely.")).font(.caption).foregroundStyle(.secondary)
             Text(language.text("Archive Engines")).font(.title2)
             Text(language.text("7-Zip is included for browsing, extraction and testing. RAR creation and recovery require a separately licensed RARLAB tool.")).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             HStack {
