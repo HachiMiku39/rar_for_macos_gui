@@ -228,7 +228,7 @@ public enum PackageInspector {
         for item in entries {
             let parts = item.path.split(separator: "/", omittingEmptySubsequences: false)
             guard ArchiveCommands.safePath(item.path), !item.path.contains("\\"), !item.isLink,
-                  !parts.contains("."), !parts.dropLast().contains(""), item.path.utf8.count < 4096 else { throw PackageFailure.unsafe }
+                  !parts.contains("."), !parts.dropLast().contains(""), item.path.utf8.count < 4096 else { throw ArchiveError.details("Unsafe archive path: {0}", [item.path]) }
             let trimmed = item.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
             let canonical = allowCaseCollisions ? trimmed : trimmed.decomposedStringWithCanonicalMapping.lowercased()
             guard names.insert(canonical).inserted else { throw PackageFailure.unsafe }
@@ -311,7 +311,7 @@ public enum PackageInspector {
                     guard let executable = plist["CFBundleExecutable"] as? String, !executable.isEmpty, !executable.contains("/"), !executable.contains("\\"), ArchiveCommands.safePath(executable), executable != "." else { throw PackageFailure.malformed }
                     expected.insert(parent + "/" + executable)
                     if roots.contains(parent) {
-                        for key in ["CFBundleIdentifier", "CFBundleDisplayName", "CFBundleName", "CFBundleShortVersionString", "CFBundleVersion", "CFBundleExecutable"] {
+                        for key in ["CFBundleIdentifier", "CFBundleDisplayName", "CFBundleName", "CFBundleShortVersionString", "CFBundleVersion", "MinimumOSVersion", "CFBundleExecutable"] {
                             if let value = plist[key] { field(roots.count == 1 ? key : parent + " · " + key, String(describing: value)) }
                         }
                     }

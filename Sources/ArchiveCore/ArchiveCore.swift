@@ -72,6 +72,7 @@ public enum ArchiveBrowser {
         let prefix = directory.isEmpty ? "" : directory + "/"
         var rows: [String: ArchiveEntry] = [:]
         for entry in entries where entry.path.hasPrefix(prefix) {
+            if Task.isCancelled { return [] }
             let tail = String(entry.path.dropFirst(prefix.count)).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
             guard !tail.isEmpty else { continue }
             if !filter.isEmpty {
@@ -148,6 +149,10 @@ public enum PreviewSafety {
 }
 
 public enum ArchiveCommands {
+    public static func resourceSwitches(_ archive: URL) -> [String] {
+        let budget = ArchiveResources.shared.budget
+        return ["-mmt=\(budget.workers)"] + (archive.pathExtension.lowercased() == "7z" ? ["-mmemuse=\(budget.memory / (1024 * 1024))m"] : [])
+    }
     public static let extensions = ["rar", "r00", "zip", "zipx", "z01", "7z", "001", "tar", "iso", "udf", "cab", "arj", "lzh", "lha", "gz", "gzip", "tgz", "tpz", "bz2", "bzip2", "tbz", "tbz2", "xz", "txz", "z", "taz", "zst", "tzst", "jar", "uue", "uu", "dmg", "img", "wim", "swm", "esd", "xar", "pkg", "cpio", "rpm", "deb", "lzma", "epub", "apk", "ipa", "ova"]
     public static func isCompressedTar(_ url: URL) -> Bool {
         let name = url.lastPathComponent.lowercased()
@@ -172,11 +177,11 @@ public enum ArchiveCommands {
         try literalSelection(selected)
         let p = try passwordSwitch(password)
         if (engine ?? backend(archive)) == .rar { return ["x", "-cfg-", "-o-", "-ol-", "-idc", p, "--", archive.path] + selected + [destination.path + "/"] }
-        return ["x", "-aos", "-sccUTF-8", "-o" + destination.path, "--", archive.path] + selected
+        return ["x", "-aos", "-sccUTF-8", "-o" + destination.path] + resourceSwitches(archive) + ["--", archive.path] + selected
     }
     public static func test(_ archive: URL, password: String, using engine: Backend? = nil) throws -> [String] {
         let p = try passwordSwitch(password)
-        return (engine ?? backend(archive)) == .rar ? ["t", "-cfg-", "-idc", p, "--", archive.path] : ["t", "-sccUTF-8", "--", archive.path]
+        return (engine ?? backend(archive)) == .rar ? ["t", "-cfg-", "-idc", p, "--", archive.path] : ["t", "-sccUTF-8"] + resourceSwitches(archive) + ["--", archive.path]
     }
     public static func create(output: URL, inputs: [URL], password: String, headers: Bool, volumeMB: Int, recovery: Int, options: CreationOptions = CreationOptions()) throws -> [String] {
         guard !inputs.isEmpty, (0...1_000_000).contains(volumeMB), (0...100).contains(recovery) else { throw ArchiveError.invalid("Select files; volume size must be 0–1000000 MB and recovery record 0–100%.") }
@@ -204,7 +209,9 @@ public enum ArchiveCommands {
             args += patterns.map { "-xr!" + $0 }
             return args + ["--", output.path] + inputs.map { "./" + $0.lastPathComponent }
         }
-        var args = ["a", "-cfg-", "-ma5", "-r", "-idc", try passwordSwitch(password, headers: headers)] + (try options.rarSwitches())
+        // During creation RAR interprets -p- as the literal password "-".
+        // An unencrypted archive must omit the password switch entirely.
+        var args = ["a", "-cfg-", "-ma5", "-r", "-idc"] + (password.isEmpty ? [] : [try passwordSwitch(password, headers: headers)]) + (try options.rarSwitches())
         if volumeMB > 0 { args.append("-v\(volumeMB)m") }
         if recovery > 0 { args.append("-rr\(recovery)p") }
         return args + ["--", output.path] + inputs.map { "./" + $0.lastPathComponent }
@@ -238,92 +245,7 @@ public struct CLIResult {
     public let stdout: String
     public let stderr: String
     public let cancelled: Bool
-    fileprivate let listingOutput: String
-    public func archiveEntries(backend: Backend) -> [ArchiveEntry] { ArchiveCommands.parse(listingOutput, backend: backend) }
-}
-
-/// One job at a time. Pipes are drained concurrently so verbose children cannot deadlock.
-public final class CLIRunner: @unchecked Sendable {
-    private let lock = NSLock()
-    private var process: Process?
-    private var cancelled = false
-    public init() {}
-    public func cancel() {
-        lock.lock(); cancelled = true; let child = process; lock.unlock()
-        guard let child, child.isRunning else { return }
-        child.terminate()
-        DispatchQueue.global().asyncAfter(deadline: .now() + 2) { if child.isRunning { kill(child.processIdentifier, SIGKILL) } }
-    }
-    public func run(executable: String, arguments: [String], directory: URL? = nil, password: String = "", outputFile: URL? = nil, outputLimit: Int? = nil, update: @escaping (String, String) -> Void) async throws -> CLIResult {
-        guard executable.hasPrefix("/"), FileManager.default.isExecutableFile(atPath: executable) else { throw ArchiveError.details("The engine path must be an absolute path to an executable: {0}", [executable]) }
-        _ = try ArchiveCommands.passwordSwitch(password)
-        lock.withLock { cancelled = false }
-        return try await withCheckedThrowingContinuation { continuation in
-            DispatchQueue.global(qos: .userInitiated).async {
-                let child = Process(), out = Pipe(), err = Pipe(), input = Pipe()
-                child.executableURL = URL(fileURLWithPath: executable)
-                child.arguments = arguments
-                child.currentDirectoryURL = directory
-                child.environment = ["PATH": "/usr/bin:/bin", "LANG": "en_US.UTF-8", "LC_ALL": "en_US.UTF-8", "HOME": NSHomeDirectory()]
-                child.standardOutput = out; child.standardError = err; child.standardInput = input
-                var binaryOutput: FileHandle?
-                if let outputFile {
-                    guard FileManager.default.createFile(atPath: outputFile.path, contents: nil, attributes: [.posixPermissions: 0o600]), let handle = try? FileHandle(forWritingTo: outputFile) else { continuation.resume(throwing: ArchiveError.invalid("Cannot create temporary output.")); return }
-                    binaryOutput = handle
-                }
-                defer { try? binaryOutput?.close() }
-                self.lock.lock(); self.process = child; self.lock.unlock()
-                do { try child.run() } catch {
-                    self.lock.lock(); self.process = nil; self.lock.unlock()
-                    continuation.resume(throwing: error); return
-                }
-                self.lock.lock(); let cancelledBeforeLaunch = self.cancelled; self.lock.unlock()
-                if cancelledBeforeLaunch { self.cancel() }
-                // Password never enters argv, environment, defaults, temporary files or command logs.
-                // RAR reads redirected stdin; creation asks for confirmation, so send two lines.
-                if !password.isEmpty { try? input.fileHandleForWriting.write(contentsOf: Data((password + "\n" + password + "\n").utf8)) }
-                try? input.fileHandleForWriting.close()
-                let group = DispatchGroup(), outputLock = NSLock()
-                var stdout = Data(), stderr = Data()
-                var binaryCount = 0, binaryFailure = false
-                let streams = [(out.fileHandleForReading, false), (err.fileHandleForReading, true)]
-                for (handle, isError) in streams {
-                    group.enter()
-                    DispatchQueue.global().async {
-                        while true {
-                            let data = handle.availableData
-                            if data.isEmpty { break }
-                            outputLock.lock()
-                            if !isError, let binaryOutput {
-                                if !binaryFailure {
-                                    if let outputLimit, data.count > outputLimit - binaryCount {
-                                        binaryFailure = true; self.cancel()
-                                    } else {
-                                        do { try binaryOutput.write(contentsOf: data); binaryCount += data.count }
-                                        catch { binaryFailure = true; self.cancel() }
-                                    }
-                                }
-                                outputLock.unlock(); continue
-                            }
-                            if isError { stderr.append(data) } else { stdout.append(data) }
-                            // Bound retained output. Truncated listings are refused by the model.
-                            if stdout.count > 16_000_000 { self.cancel() }
-                            if stderr.count > 2_000_000 { self.cancel() }
-                            let a = String(decoding: stdout, as: UTF8.self), b = String(decoding: stderr, as: UTF8.self)
-                            // With a secret, withhold live text to avoid split-chunk disclosure.
-                            if password.isEmpty { update(a, b) }
-                            outputLock.unlock()
-                        }
-                        group.leave()
-                    }
-                }
-                child.waitUntilExit(); group.wait()
-                self.lock.lock(); let wasCancelled = self.cancelled; self.process = nil; self.lock.unlock()
-                func redact(_ data: Data) -> String { let s = String(decoding: data, as: UTF8.self); return password.isEmpty ? s : s.replacingOccurrences(of: password, with: "••••") }
-                let a = redact(stdout), b = redact(stderr)
-                update(a, b)
-                continuation.resume(returning: CLIResult(status: binaryFailure ? 2 : child.terminationStatus, stdout: a, stderr: b + (binaryFailure ? "\nBinary output limit exceeded or write failed." : ""), cancelled: wasCancelled, listingOutput: String(decoding: stdout, as: UTF8.self)))
-            }
-        }
-    }
+    let listingOutput: String
+    var parsedEntries: [ArchiveEntry]? = nil
+    public func archiveEntries(backend: Backend) -> [ArchiveEntry] { parsedEntries ?? ArchiveCommands.parse(listingOutput, backend: backend) }
 }

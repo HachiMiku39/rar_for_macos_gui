@@ -1,4 +1,229 @@
 import Foundation
+import CryptoKit
+import Darwin
+
+public enum ArchiveEdit {
+    case add([URL]), delete([String]), rename(String, String)
+}
+
+/// Editing is deliberately limited to plain, single-volume archives. Work never
+/// reaches the original until the modified copy has passed an integrity test.
+public enum ArchiveEditor {
+    public static func refusal(_ url: URL, listing: String) -> String? {
+        let ext = url.pathExtension.lowercased()
+        guard ["rar", "zip", "7z"].contains(ext) else { return "Editing requires a single-volume RAR, ZIP or 7z archive." }
+        let lines = listing.components(separatedBy: .newlines).map { $0.trimmingCharacters(in: .whitespaces) }
+        let expected = ext == "rar" ? ["Type = Rar", "Type = Rar5"] : ["Type = " + ext]
+        guard lines.contains(where: expected.contains) else { return "The detected archive format does not match its extension." }
+        if lines.contains("Encrypted = +") || listing.contains("7zAES") || listing.contains("AES-") {
+            return "Encrypted archives are read-only in this version."
+        }
+        if lines.contains(where: { $0.hasPrefix("Volumes = ") && $0 != "Volumes = 1" }) || lines.contains("Multivolume = +") || url.lastPathComponent.range(of: "(?i)\\.part[0-9]+\\.rar$", options: .regularExpression) != nil {
+            return "Split archives are read-only in this version."
+        }
+        if lines.contains("Locked = +") { return "Locked archives are read-only." }
+        return nil
+    }
+    public static func digest(_ url: URL) throws -> Data {
+        let f = try FileHandle(forReadingFrom: url); defer { try? f.close() }
+        var hash = SHA256()
+        while let bytes = try f.read(upToCount: 1024 * 1024), !bytes.isEmpty { try Task.checkCancellation(); hash.update(data: bytes) }
+        return Data(hash.finalize())
+    }
+    public static func renameDestination(_ old: String, name: String, entries: [ArchiveEntry]) throws -> String {
+        try ArchiveCommands.literalSelection([old, name])
+        guard name != ".", !name.contains("/"), !name.contains("\\"), !name.hasPrefix("-"), name.utf8.count <= 240,
+              entries.contains(where: { $0.path == old && !$0.isDirectory }) else { throw ArchiveError.invalid("Choose one regular file and a simple new filename.") }
+        let parent = (old as NSString).deletingLastPathComponent
+        let target = parent.isEmpty ? name : parent + "/" + name
+        let key = target.decomposedStringWithCanonicalMapping.lowercased()
+        guard !entries.contains(where: { $0.path.decomposedStringWithCanonicalMapping.lowercased() == key || $0.path.decomposedStringWithCanonicalMapping.lowercased().hasPrefix(key + "/") }) else { throw ArchiveError.invalid("That name already exists in the archive.") }
+        return target
+    }
+    public static func apply(_ edit: ArchiveEdit, archive: URL, sevenZip: String, rar: String, runner: CLIRunner, update: @escaping (String, String) -> Void) async throws -> URL {
+        let fm = FileManager.default
+        let values = try archive.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
+        guard values.isRegularFile == true, values.isSymbolicLink != true else { throw ArchiveError.invalid("Editing requires a regular local archive file.") }
+        let before = try digest(archive)
+        let root = archive.deletingLastPathComponent().appendingPathComponent(".ArchiveDesk-edit-" + UUID().uuidString)
+        try fm.createDirectory(at: root, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        defer { try? fm.removeItem(at: root) }
+        let copy = root.appendingPathComponent(archive.lastPathComponent)
+        try fm.copyItem(at: archive, to: copy)
+        guard try digest(copy) == before else { throw ArchiveError.invalid("The archive changed during editing. Nothing was replaced.") }
+        func run(_ engine: String, _ args: [String], at directory: URL? = nil) async throws -> CLIResult {
+            try Task.checkCancellation()
+            let r = try await runner.run(executable: engine, arguments: args, directory: directory, update: update)
+            if r.cancelled { throw CancellationError() }
+            guard r.status == 0 else { throw ArchiveError.details("Engine exit code {0}. The original archive was not changed. {1}", [String(r.status), r.stderr + "\n" + r.stdout]) }
+            return r
+        }
+        let listing = try await run(sevenZip, ArchiveCommands.list(copy, password: "", using: .sevenZip))
+        if let reason = refusal(copy, listing: listing.stdout) { throw ArchiveError.invalid(reason) }
+        let entries = listing.archiveEntries(backend: .sevenZip)
+        let package = PackageInspector.kind(archive: copy, entries: entries)
+        guard package != .ipa && package != .apk else { throw ArchiveError.invalid("Application packages are read-only.") }
+        try PackageInspector.validate(entries)
+        let isRAR = archive.pathExtension.lowercased() == "rar"
+        let engine = isRAR ? rar : sevenZip
+        let switches = isRAR ? ["-cfg-", "-idc"] : ["-spd", "-sccUTF-8"]
+        var expected = Set(entries.map(\.path)), addedPaths = Set<String>()
+        switch edit {
+        case .delete(let paths):
+            try ArchiveCommands.literalSelection(paths)
+            guard !paths.isEmpty, paths.allSatisfy({ path in expected.contains(path) || expected.contains(where: { $0.hasPrefix(path + "/") }) }) else { throw ArchiveError.invalid("Select files to edit.") }
+            let targets = entries.filter { item in paths.contains(item.path) || paths.contains(where: { item.path.hasPrefix($0 + "/") }) }.map(\.path)
+            guard !targets.isEmpty, targets.count < entries.count else { throw ArchiveError.invalid("Keep at least one item in the archive.") }
+            try ArchiveCommands.literalSelection(targets)
+            _ = try await run(engine, ["d"] + switches + ["--", copy.path] + targets)
+            expected.subtract(targets)
+        case .rename(let old, let name):
+            let target = try renameDestination(old, name: name, entries: entries)
+            _ = try await run(engine, ["rn"] + switches + ["--", copy.path, old, target])
+            expected.remove(old); expected.insert(target)
+        case .add(let inputs):
+            guard !inputs.isEmpty, Set(inputs.map { $0.lastPathComponent.decomposedStringWithCanonicalMapping.lowercased() }).count == inputs.count else { throw ArchiveError.invalid("Select source items with distinct names.") }
+            let payload = root.appendingPathComponent("inputs")
+            try fm.createDirectory(at: payload, withIntermediateDirectories: false)
+            for input in inputs {
+                try ArchiveCommands.literalSelection([input.lastPathComponent])
+                guard !input.lastPathComponent.hasPrefix("-"), input.lastPathComponent != ".", input.resolvingSymlinksInPath() != archive.resolvingSymlinksInPath(), !root.path.hasPrefix(input.resolvingSymlinksInPath().path + "/") else { throw ArchiveError.invalid("The archive or its parent cannot be added to itself.") }
+                var sources = [input]
+                if let walk = fm.enumerator(at: input, includingPropertiesForKeys: [.isSymbolicLinkKey, .isRegularFileKey, .isDirectoryKey]) { for case let file as URL in walk { sources.append(file) } }
+                var bytes = 0
+                guard sources.count <= 50_000 else { throw PackageFailure.limit }
+                for file in sources {
+                    try Task.checkCancellation()
+                    let value = try file.resourceValues(forKeys: [.isSymbolicLinkKey, .isRegularFileKey, .isDirectoryKey, .fileSizeKey])
+                    guard value.isSymbolicLink != true, value.isRegularFile == true || value.isDirectory == true else { throw ArchiveError.invalid("Links and special files cannot be added.") }
+                    let size = value.isRegularFile == true ? (value.fileSize ?? Int.max) : 0
+                    guard size >= 0, size <= 512 * 1024 * 1024, bytes <= 2 * 1024 * 1024 * 1024 - size else { throw PackageFailure.limit }; bytes += size
+                }
+                let target = payload.appendingPathComponent(input.lastPathComponent)
+                try fm.copyItem(at: input, to: target)
+            }
+            guard let walk = fm.enumerator(at: payload, includingPropertiesForKeys: [.isSymbolicLinkKey, .isRegularFileKey, .isDirectoryKey]) else { throw ArchiveError.invalid("Cannot read source files.") }
+            var files: [ArchiveEntry] = []
+            for case let file as URL in walk {
+                try Task.checkCancellation()
+                let v = try file.resourceValues(forKeys: [.isSymbolicLinkKey, .isRegularFileKey, .isDirectoryKey, .fileSizeKey])
+                guard v.isSymbolicLink != true, v.isRegularFile == true || v.isDirectory == true else { throw ArchiveError.invalid("Links and special files cannot be added.") }
+                let base = payload.resolvingSymlinksInPath().path
+                let full = file.resolvingSymlinksInPath().path
+                guard full.hasPrefix(base + "/") else { throw PackageFailure.unsafe }
+                let path = String(full.dropFirst(base.count + 1))
+                files.append(ArchiveEntry(path: path, size: String(v.fileSize ?? 0), modified: "", isDirectory: v.isDirectory == true, isLink: false))
+                if v.isRegularFile == true { addedPaths.insert(path) }
+            }
+            try PackageInspector.validate(files)
+            let merged = entries.filter { original in !files.contains(where: { $0.path == original.path }) } + files
+            try PackageInspector.validate(merged)
+            expected.formUnion(addedPaths)
+            _ = try await run(engine, ["a"] + switches + (isRAR ? ["-r"] : ["-sse"]) + ["--", copy.path] + inputs.map { "./" + $0.lastPathComponent }, at: payload)
+        }
+        _ = try await run(sevenZip, ArchiveCommands.test(copy, password: "", using: .sevenZip))
+        let result = try await run(sevenZip, ArchiveCommands.list(copy, password: "", using: .sevenZip))
+        let after = result.archiveEntries(backend: .sevenZip)
+        try PackageInspector.validate(after)
+        let paths = Set(after.map(\.path))
+        // Engines may add/remove explicit directory records; regular files must agree.
+        let expectedFiles = expected.subtracting(entries.filter(\.isDirectory).map(\.path))
+        guard expectedFiles.isSubset(of: paths), Set(after.filter { !$0.isDirectory }.map(\.path)) == expectedFiles else { throw ArchiveError.invalid("The edited contents did not match the request. Nothing was replaced.") }
+        try Task.checkCancellation()
+        guard try digest(archive) == before else { throw ArchiveError.invalid("The archive changed during editing. Nothing was replaced.") }
+        let backup = archive.deletingLastPathComponent().appendingPathComponent(archive.lastPathComponent + ".ArchiveDesk-backup-" + UUID().uuidString)
+        try fm.copyItem(at: archive, to: backup)
+        guard try digest(backup) == before, try digest(archive) == before else { throw ArchiveError.invalid("The archive changed during editing. Nothing was replaced.") }
+        try Task.checkCancellation()
+        guard Darwin.rename(copy.path, archive.path) == 0 else { throw ArchiveError.invalid("Cannot replace the archive. The original and backup were kept.") }
+        return backup
+    }
+}
+
+public enum ExtractionPolicy: String, CaseIterable { case ask = "Ask before replacing", skip = "Skip existing files", rename = "Rename incoming files", replace = "Replace existing files", update = "Update older files" }
+public enum ConflictChoice { case replace, skip, rename, cancel }
+public struct ExtractionReport { public var written = 0; public var skipped = 0; public var renamed = 0; public var backups = 0 }
+
+public enum ExtractionMerger {
+    /// Refuse symlink ancestors rather than trusting string-prefix checks.
+    public static func checkDirectory(_ url: URL) throws {
+        var path = ""
+        for part in url.path.split(separator: "/") {
+            guard part != ".", part != ".." else { throw ArchiveError.invalid("Unsafe extraction path.") }
+            path += "/" + part
+            // macOS exposes these two OS-owned aliases in file-panel URLs.
+            if path == "/var" || path == "/tmp" { path = "/private" + path }
+            var info = stat()
+            guard lstat(path, &info) == 0, (info.st_mode & S_IFMT) == S_IFDIR else { throw ArchiveError.details("Unsafe destination component: {0}", [path]) }
+        }
+    }
+    public static func merge(from stage: URL, to destination: URL, policy: ExtractionPolicy, conflict: (String) async -> ConflictChoice, update: (ExtractionReport) -> Void = { _ in }) async throws -> ExtractionReport {
+        let fm = FileManager.default
+        try checkDirectory(destination)
+        guard let walk = fm.enumerator(at: stage, includingPropertiesForKeys: [.isDirectoryKey, .isRegularFileKey, .isSymbolicLinkKey]) else { throw ArchiveError.invalid("Cannot read extracted files.") }
+        var files: [URL] = []
+        for case let file as URL in walk { files.append(file) }
+        files.sort { $0.path < $1.path }
+        var report = ExtractionReport()
+        var directories: [(URL, URL)] = []
+        for file in files {
+            try Task.checkCancellation()
+            let base = stage.resolvingSymlinksInPath().path, full = file.resolvingSymlinksInPath().path
+            guard full.hasPrefix(base + "/") else { throw ArchiveError.invalid("Unsafe extraction path.") }
+            let relative = String(full.dropFirst(base.count + 1))
+            guard ArchiveCommands.safePath(relative) else { throw ArchiveError.invalid("Unsafe extraction path.") }
+            let v = try file.resourceValues(forKeys: [.isDirectoryKey, .isRegularFileKey, .isSymbolicLinkKey, .contentModificationDateKey])
+            guard v.isSymbolicLink != true, v.isDirectory == true || v.isRegularFile == true else { throw ArchiveError.invalid("Links and special files cannot be exported.") }
+            var target = destination.appendingPathComponent(relative)
+            try checkDirectory(target.deletingLastPathComponent())
+            var exists = fm.fileExists(atPath: target.path)
+            // resourceValues also catches dangling symlinks (fileExists follows them).
+            if let old = try? target.resourceValues(forKeys: [.isSymbolicLinkKey, .isDirectoryKey, .isRegularFileKey]), old.isSymbolicLink == true { throw ArchiveError.invalid("The destination contains a link or is not a directory.") }
+            if v.isDirectory == true {
+                if exists { try checkDirectory(target) } else {
+                    try fm.createDirectory(at: target, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+                    directories.append((file, target))
+                }
+                continue
+            }
+            if exists {
+                let old = try target.resourceValues(forKeys: [.isRegularFileKey, .contentModificationDateKey])
+                guard old.isRegularFile == true else { throw ArchiveError.invalid("A file conflicts with an existing directory or special file.") }
+                let choice: ConflictChoice
+                switch policy {
+                case .ask: choice = await conflict(relative)
+                case .skip: choice = .skip
+                case .rename: choice = .rename
+                case .replace: choice = .replace
+                case .update: choice = (v.contentModificationDate ?? .distantPast) > (old.contentModificationDate ?? .distantFuture) ? .replace : .skip
+                }
+                try Task.checkCancellation()
+                switch choice {
+                case .cancel: throw CancellationError()
+                case .skip: report.skipped += 1; update(report); continue
+                case .rename:
+                    var n = 2
+                    repeat { target = target.deletingLastPathComponent().appendingPathComponent((file.lastPathComponent as NSString).deletingPathExtension + " (\(n))" + (file.pathExtension.isEmpty ? "" : "." + file.pathExtension)); n += 1 } while fm.fileExists(atPath: target.path) || (try? target.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) == true
+                    exists = false; report.renamed += 1
+                case .replace: break
+                }
+            }
+            try checkDirectory(target.deletingLastPathComponent())
+            if try ExtractionSafety.copyVerifiedFile(file, to: target, replacing: exists) { report.backups += 1 }
+            report.written += 1; update(report)
+        }
+        // Finalize new directory modes/times only after their children have been written.
+        for (source, target) in directories.reversed() {
+            let attrs = try fm.attributesOfItem(atPath: source.path)
+            var kept: [FileAttributeKey: Any] = [:]
+            if let mode = attrs[.posixPermissions] as? NSNumber { kept[.posixPermissions] = mode.intValue & 0o777 }
+            kept[.modificationDate] = attrs[.modificationDate]
+            try checkDirectory(target)
+            try fm.setAttributes(kept, ofItemAtPath: target.path)
+        }
+        return report
+    }
+}
 
 /// Owns only a freshly allocated temporary directory. Source archives are never changed.
 public final class ArchiveSession {
