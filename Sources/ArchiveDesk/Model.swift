@@ -10,12 +10,18 @@ import ArchiveCore
     @Published var entries: [ArchiveEntry] = [] { didSet { refreshVisible() } }
     @Published var selection: Set<String> = []
     @Published var filter = "" { didSet { refreshVisible() } }
-    @Published var busy = false
+    @Published var busy = false { didSet { if busy != oldValue { busy ? startMonitoring() : stopMonitoring() } } }
     @Published var status = AppLanguage.shared.text("Open an archive, or drop files to create one")
     @Published var stdout = ""
     @Published var stderr = ""
     @Published var progress: Double?
     @Published var engineTask: ArchiveTaskSnapshot?
+    @Published var resourceSample = ResourceSample()
+    @Published var taskPhase = "Preparing"
+    @Published var currentTaskFile = ""
+    private var monitorTask: Task<Void, Never>?
+    private var monitorID = UUID()
+    private var monitorLocation: URL?
     @Published var memoryMode = MemoryMode(rawValue: UserDefaults.standard.string(forKey: "memoryMode") ?? "adaptive") ?? .adaptive {
         didSet { UserDefaults.standard.set(memoryMode.rawValue, forKey: "memoryMode"); ArchiveResources.shared.configure(memoryMode) }
     }
@@ -55,8 +61,39 @@ import ArchiveCore
     let runner = CLIRunner()
     init() {
         ArchiveResources.shared.configure(memoryMode)
-        runner.observe = { [weak self] snapshot in Task { @MainActor in self?.engineTask = snapshot } }
+        runner.observe = { [weak self] snapshot in Task { @MainActor in
+            guard let self, self.busy else { return }
+            self.engineTask = snapshot
+            if snapshot.state == .queued || snapshot.state == .running {
+                self.progress = snapshot.fraction
+                self.currentTaskFile = ""
+                self.taskPhase = ["a": "Compressing", "x": "Extracting", "t": "Verifying", "l": "Reading archive", "lt": "Reading archive"][snapshot.operation] ?? "Processing"
+            }
+        } }
     }
+    private func startMonitoring() {
+        monitorTask?.cancel(); monitorID = UUID()
+        let id = monitorID, engine = runner, location = monitorLocation ?? FileManager.default.temporaryDirectory
+        resourceSample = ResourceSample(); engineTask = nil; progress = nil; taskPhase = "Preparing"; currentTaskFile = ""
+        monitorTask = Task.detached(priority: .utility) { [weak self] in
+            var sampler = ResourceSampler()
+            let start = ProcessInfo.processInfo.systemUptime
+            while !Task.isCancelled {
+                var counters = engine.resourceCounters()
+                if let app = ResourceCounters.readProcess(getpid()) { counters["ArchiveDesk"] = app }
+                let now = ProcessInfo.processInfo.systemUptime
+                var sample = sampler.sample(counters, at: now); sample.elapsed = now - start
+                if let attrs = try? FileManager.default.attributesOfFileSystem(forPath: location.path) {
+                    sample.capacity = (attrs[.systemSize] as? NSNumber)?.uint64Value
+                    sample.free = (attrs[.systemFreeSize] as? NSNumber)?.uint64Value
+                }
+                await self?.acceptSample(sample, id: id)
+                do { try await Task.sleep(nanoseconds: 500_000_000) } catch { break }
+            }
+        }
+    }
+    private func acceptSample(_ sample: ResourceSample, id: UUID) { if busy && monitorID == id { resourceSample = sample } }
+    private func stopMonitoring() { monitorTask?.cancel(); monitorTask = nil; monitorID = UUID(); monitorLocation = nil }
     @Published private(set) var visible: [ArchiveEntry] = []
     @Published private(set) var visibleTotal = 0
     private var allVisible: [ArchiveEntry] = []
@@ -216,6 +253,7 @@ import ArchiveCore
             try ExtractionMerger.checkDirectory(parent)
             if extractionNewFolder { try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: false) }
             try FileManager.default.createDirectory(at: stage, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+            monitorLocation = destination
             showExtraction = false; busy = true; stdout = ""; stderr = ""; status = language.text("Extracting to {0}", destination.lastPathComponent)
             let source = session?.workingURL ?? archive, chosen = extractionSelection, secret = password, engine = resolvedSevenZip, engineRunner = runner
             let policy = extractionPolicy, openFolder = extractionOpenFolder
@@ -235,17 +273,23 @@ import ArchiveCore
                             guard !listed.cancelled, listed.status == 0 else { throw ArchiveError.invalid("Reading the archive failed. Check the task log.") }
                             let rows = listed.archiveEntries(backend: .sevenZip)
                             let compressed = UInt64((try? source.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
-                            let estimated = try ExtractionSafety.validate(rows, compressedBytes: compressed)
-                            try DiskSpace.require(estimated, at: stage)
-                            // Staging and publication may temporarily require two copies.
-                            try DiskSpace.require(estimated, at: destination)
+                            _ = try ExtractionSafety.validate(rows, compressedBytes: compressed)
+                            let selectedRows = chosen.isEmpty ? rows : rows.filter { row in chosen.contains { row.path == $0 || row.path.hasPrefix($0.trimmingCharacters(in: CharacterSet(charactersIn: "/")) + "/") } }
+                            let estimated = try ExtractionSafety.validate(selectedRows)
+                            try DiskSpace.requireStaging(estimated, stage: stage, destination: destination)
                             try Task.checkCancellation()
                             let extracted = try await engineRunner.run(executable: engine, arguments: ArchiveCommands.extract(source, destination: stage, selected: chosen, password: secret, using: .sevenZip), password: secret, diskGuard: stage, update: log)
                             guard !extracted.cancelled, extracted.status == 0 else { throw ArchiveError.invalid("Extraction failed. Check the task log. The destination was not changed.") }
                         }
+                        await self.updateTaskPhase("Publishing files", fraction: nil)
                         return try await ExtractionMerger.merge(from: stage, to: destination, policy: policy, conflict: { path in
                             await self.askConflict(path)
-                        }) { report in Task { @MainActor in self.status = self.extractionSummary(report) } }
+                        }) { report in Task { @MainActor in
+                            guard self.busy else { return }
+                            self.status = self.extractionSummary(report)
+                            self.updateTaskPhase("Publishing files", fraction: report.fraction)
+                            self.currentTaskFile = report.currentFile
+                        } }
                     }
                     let report = try await withTaskCancellationHandler(operation: { try await work.value }, onCancel: { work.cancel(); engineRunner.cancel() })
                     status = extractionSummary(report)
@@ -257,6 +301,7 @@ import ArchiveCore
     private func extractionSummary(_ report: ExtractionReport) -> String {
         language.text("Written: {0} · Skipped: {1} · Renamed: {2} · Backups: {3}", String(report.written), String(report.skipped), String(report.renamed), String(report.backups))
     }
+    private func updateTaskPhase(_ phase: String, fraction: Double?) { guard busy else { return }; taskPhase = phase; progress = fraction }
     private func askConflict(_ path: String) async -> ConflictChoice {
         let alert = NSAlert(); alert.messageText = language.text("File already exists")
         alert.informativeText = path + "\n" + language.text("Replacing keeps a backup beside the existing file.")
@@ -356,30 +401,26 @@ import ArchiveCore
         if options.format == .rar && !requireRAR() { return }
         let panel = NSSavePanel(); panel.nameFieldStringValue = "Archive." + options.format.rawValue; panel.title = language.text("Create Archive")
         guard panel.runModal() == .OK, let selectedOutput = panel.url else { return }
-        var createdFolder: URL?
         do {
-            // Validate before creating any directory. Volumes always use a fresh folder.
             _ = try ArchiveCommands.create(output: selectedOutput, inputs: inputs, password: secret, headers: headers, volumeMB: volume, recovery: recovery, options: options)
-            var output = selectedOutput
-            if volume > 0 {
-                let folder = selectedOutput.deletingLastPathComponent().appendingPathComponent(selectedOutput.deletingPathExtension().lastPathComponent + "-parts-" + String(UUID().uuidString.prefix(8)))
-                try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
-                createdFolder = folder
-                output = folder.appendingPathComponent(selectedOutput.lastPathComponent)
+            let engine = options.format == .rar ? rar : resolvedSevenZip, source = inputs, engineRunner = runner
+            monitorLocation = selectedOutput.deletingLastPathComponent()
+            showCreate = false; busy = true; stdout = ""; stderr = ""; status = language.text("Create Archive")
+            exportTask = Task {
+                defer { busy = false; progress = nil }
+                do {
+                    let work = Task.detached(priority: .userInitiated) {
+                        try await ArchiveCreator.create(output: selectedOutput, inputs: source, password: secret, headers: headers, volumeMB: volume, recovery: recovery, options: options, executable: engine, runner: engineRunner, phase: { phase, fraction in
+                            Task { @MainActor in self.updateTaskPhase(phase, fraction: fraction) }
+                        }) { a, b in Task { @MainActor in self.stdout = String(a.suffix(100_000)); self.stderr = String(b.suffix(100_000)) } }
+                    }
+                    let output = try await withTaskCancellationHandler(operation: { try await work.value }, onCancel: { work.cancel(); engineRunner.cancel() })
+                    status = language.text("{0} · Done", language.text("Create Archive"))
+                    NSWorkspace.shared.activateFileViewerSelecting([output])
+                } catch is CancellationError { status = language.text("Cancelled. No unfinished archive was published.") }
+                catch { self.error = language.message(error); status = language.text("Creation failed. No unfinished archive was published.") }
             }
-            let args = try ArchiveCommands.create(output: output, inputs: inputs, password: secret, headers: headers, volumeMB: volume, recovery: recovery, options: options)
-            let engine = options.format == .rar ? rar : resolvedSevenZip
-            let firstVolume = volume > 0 ? URL(fileURLWithPath: output.path + ".001") : output
-            let verification = options.testAfter && options.format != .rar
-                ? try ArchiveCommands.test(firstVolume, password: secret, using: .sevenZip) : nil
-            showCreate = false
-            launch(language.text("Create Archive"), executable: engine, args: args, directory: inputs.first?.deletingLastPathComponent(), secret: secret, verification: verification) { _ in
-                NSWorkspace.shared.activateFileViewerSelecting([output.deletingLastPathComponent()])
-            }
-        } catch {
-            if let createdFolder { try? FileManager.default.removeItem(at: createdFolder) }
-            self.error = language.message(error)
-        }
+        } catch { self.error = language.message(error) }
     }
     func archiveInfo() {
         guard let archive else { return }
@@ -423,7 +464,6 @@ import ArchiveCore
                 let result = try await runner.run(executable: executable, arguments: actualArgs, directory: directory, password: secret) { a, b in
                     Task { @MainActor in
                         self.stdout = String(a.suffix(200_000)); self.stderr = String(b.suffix(100_000))
-                        if let regex = try? NSRegularExpression(pattern: "([0-9]{1,3})%"), let match = regex.matches(in: a, range: NSRange(a.startIndex..., in: a)).last, let range = Range(match.range(at: 1), in: a), let value = Double(a[range]) { self.progress = min(value / 100, 1) }
                     }
                 }
                 stdout = String(result.stdout.suffix(200_000)); stderr = String(result.stderr.suffix(100_000))

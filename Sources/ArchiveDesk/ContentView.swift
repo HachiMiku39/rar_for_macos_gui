@@ -63,6 +63,7 @@ struct ContentView: View {
                         logPane(language.text("Error output · stderr"), text: model.stderr)
                     }.frame(height: 170)
                 }
+                if model.busy { taskMonitor }
                 statusBar
             }
         }
@@ -122,10 +123,6 @@ struct ContentView: View {
     }
     private var statusBar: some View {
         HStack {
-            if model.busy {
-                if let progress = model.progress { ProgressView(value: progress).frame(width: 100) }
-                else { ProgressView().controlSize(.small) }
-            }
             Text(language.text(model.status)).font(.caption).lineLimit(2)
             if let task = model.engineTask, model.busy, task.state == .running {
                 Text(language.text(task.state.rawValue)).font(.caption).foregroundStyle(.secondary)
@@ -133,6 +130,53 @@ struct ContentView: View {
             Spacer()
             if model.busy { Button(language.text("Cancel Task")) { model.cancelCurrentTask() } }
         }.padding(10).background(.bar)
+    }
+    private func byteText(_ value: UInt64?) -> String {
+        guard let value else { return "—" }
+        if value == 0 { return "0 B" }
+        return ByteCountFormatter.string(fromByteCount: Int64(min(value, UInt64(Int64.max))), countStyle: .binary)
+    }
+    private func rateText(_ value: Double?) -> String {
+        guard let value, value.isFinite, value >= 0 else { return "—" }
+        return byteText(UInt64(min(value, Double(Int64.max / 2)))) + "/s"
+    }
+    private var taskMonitor: some View {
+        let sample = model.resourceSample
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Label(language.text(model.taskPhase), systemImage: "chart.bar.xaxis")
+                Spacer()
+                Text(language.text("Elapsed: {0}", String(format: "%02d:%02d", Int(sample.elapsed) / 60, Int(sample.elapsed) % 60)))
+                Text(model.progress.map { String(format: "%.0f%%", $0 * 100) } ?? language.text("Indeterminate"))
+                    .frame(minWidth: 90, alignment: .trailing)
+            }.font(.callout).monospacedDigit()
+            if let value = model.progress { ProgressView(value: value).accessibilityLabel(language.text("Current phase progress")) }
+            else { ProgressView().progressViewStyle(.linear).accessibilityLabel(language.text("Indeterminate")) }
+            HStack(spacing: 24) {
+                metric("CPU", sample.cpuPercent.map { String(format: "%.1f%%", $0) } ?? "—", "cpu")
+                metric("RAM", byteText(sample.memory), "memorychip")
+                metric("Disk read", rateText(sample.readPerSecond), "arrow.down.circle")
+                metric("Disk write", rateText(sample.writePerSecond), "arrow.up.circle")
+                Spacer(minLength: 0)
+            }
+            if let total = sample.capacity, let free = sample.free, total > 0 {
+                HStack {
+                    Label(language.text("Destination volume"), systemImage: "externaldrive")
+                    Text(language.text("Used: {0} · Free: {1}", byteText(total - min(free, total)), byteText(free)))
+                    Spacer()
+                    Text(String(format: "%.1f%%", Double(total - min(free, total)) / Double(total) * 100)).monospacedDigit()
+                }.font(.caption)
+            } else { Text(language.text("Destination volume: unavailable")).font(.caption) }
+            if !model.currentTaskFile.isEmpty { Text(model.currentTaskFile).font(.caption).lineLimit(1).truncationMode(.middle) }
+            Text(language.text("Current phase only. CPU/RAM/I/O: ArchiveDesk + active engine; 100% CPU = one core. I/O is sampled process disk traffic, not device utilization; cached reads may be zero. — means unavailable."))
+                .font(.caption2).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+        }.padding(12).archiveGlass().padding(.horizontal, 10).padding(.top, 8)
+    }
+    private func metric(_ title: String, _ value: String, _ icon: String) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Label(language.text(title), systemImage: icon).font(.caption).foregroundStyle(.secondary)
+            Text(value).font(.system(.callout, design: .monospaced)).monospacedDigit()
+        }.frame(minWidth: 100, alignment: .leading)
     }
     private var entryTable: some View {
         Table(model.visible, selection: $model.selection) {

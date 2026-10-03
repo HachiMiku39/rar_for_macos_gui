@@ -38,7 +38,7 @@ import ArchiveCore
         builtins = Set(packs.map(\.id))
         if let urls = try? FileManager.default.contentsOfDirectory(at: packDirectory, includingPropertiesForKeys: nil) {
             for url in urls where url.pathExtension == "json" {
-                if let pack = try? LanguagePack.decode(Data(contentsOf: url), reference: english, legacyKeys: legacyKeys), !builtins.contains(pack.id), !packs.contains(where: { $0.id == pack.id }) { packs.append(pack) }
+                if let pack = try? LanguagePack.decode(LanguagePack.readFile(url), reference: english, legacyKeys: legacyKeys), !builtins.contains(pack.id), !packs.contains(where: { $0.id == pack.id }) { packs.append(pack) }
             }
         }
     }
@@ -56,7 +56,7 @@ import ArchiveCore
         do {
             let size = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
             guard size <= 1_048_576 else { throw PackError.invalid("Language pack exceeds 1 MB.") }
-            let data = try Data(contentsOf: url)
+            let data = try LanguagePack.readFile(url)
             let pack = try LanguagePack.decode(data, reference: english, legacyKeys: legacyKeys)
             guard !builtins.contains(pack.id) else { throw PackError.invalid("Built-in language IDs cannot be replaced. Use a new ID.") }
             if packs.contains(where: { $0.id == pack.id }) {
