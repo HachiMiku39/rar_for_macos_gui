@@ -1,4 +1,4 @@
-name: Build and publish beta # Swift 6.2+ / Xcode 26 compatibility
+name: Build and publish release
 on:
   push:
     branches: [main]
@@ -20,7 +20,8 @@ jobs:
       - name: Validate version and toolchain
         run: |
           version=$(tr -d '\n\r' < release-version.txt)
-          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+-beta\.[0-9]+$ ]]
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-beta\.[0-9]+)?$ ]]
+          test -f "docs/releases/${version}.md"
           echo "RELEASE_VERSION=$version" >> "$GITHUB_ENV"
           xcodebuild -version
       - name: Build helper and test core
@@ -36,8 +37,10 @@ jobs:
           shasum -a 256 "ArchiveDesk-${RELEASE_VERSION}-universal.dmg" "ArchiveDesk-${RELEASE_VERSION}-universal.zip" "ArchiveDesk-${RELEASE_VERSION}-source.zip" > "ArchiveDesk-${RELEASE_VERSION}-SHA256SUMS.txt"
           hdiutil verify "ArchiveDesk-${RELEASE_VERSION}-universal.dmg"
           unzip -tq "ArchiveDesk-${RELEASE_VERSION}-universal.zip"
-      - name: Publish prerelease
+      - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "v${RELEASE_VERSION}" dist/* --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "ArchiveDesk ${RELEASE_VERSION}" --notes-file docs/RELEASE-1.0-beta.3.md --prerelease
+          release_flags=(--latest)
+          if [[ "$RELEASE_VERSION" == *-beta.* ]]; then release_flags=(--prerelease); fi
+          gh release create "v${RELEASE_VERSION}" dist/* --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "ArchiveDesk ${RELEASE_VERSION}" --notes-file "docs/releases/${RELEASE_VERSION}.md" "${release_flags[@]}"

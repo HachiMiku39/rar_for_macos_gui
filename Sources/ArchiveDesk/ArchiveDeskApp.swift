@@ -2,7 +2,8 @@ import SwiftUI
 import AppKit
 
 /// Load the bundled bitmap explicitly as well as declaring CFBundleIconFile.
-/// Dock can otherwise retain a blank launch-time icon for an unsigned replacement build.
+/// Use the prepared legacy ICNS (rounded silhouette + transparent margins), never
+/// the full-bleed source artwork: explicit Dock image assignment shows its raw shape.
 @MainActor final class ArchiveDeskAppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         guard let url = Bundle.main.url(forResource: "AppIcon", withExtension: "icns"),

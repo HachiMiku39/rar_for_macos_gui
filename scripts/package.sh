@@ -4,7 +4,7 @@ cd "$(dirname "$0")/.."
 build_dir="$PWD/.build-xcode"
 release_dir="$PWD/dist"
 version="$(tr -d '\n\r' < release-version.txt)"
-[[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+-beta\.[0-9]+$ ]]
+[[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-beta\.[0-9]+)?$ ]]
 mkdir -p "$release_dir"
 xcodebuild -project ArchiveDesk.xcodeproj -scheme ArchiveDesk -configuration Release -derivedDataPath "$build_dir" CODE_SIGNING_ALLOWED=NO ARCHS='arm64 x86_64' ONLY_ACTIVE_ARCH=NO build
 stage_dir="$(mktemp -d)"

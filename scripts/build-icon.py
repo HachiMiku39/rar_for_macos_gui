@@ -7,7 +7,9 @@ import subprocess
 import tempfile
 
 root = Path(__file__).resolve().parents[1]
-source = root / 'Resources/AppIcon-source.png'
+# The original artwork remains available for future edits. The Dock rendition
+# includes rounded corners and transparent margins for the legacy ICNS path.
+source = root / 'Resources/AppIcon-dock.png'
 representations = [('icp4', 16), ('icp5', 32), ('icp6', 64), ('ic07', 128),
                    ('ic08', 256), ('ic09', 512), ('ic10', 1024),
                    ('ic11', 32), ('ic12', 64), ('ic13', 256), ('ic14', 512)]

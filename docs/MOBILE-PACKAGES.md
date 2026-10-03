@@ -43,7 +43,7 @@ From 0.7 onward, the new-folder rule above applies to internal staging. The GUI 
 
 Three user-supplied local samples were checked without executing them or uploading their bytes, metadata files, or the supplied research document. The source tree includes synthetic parser tests and an opt-in local integration test, not third-party packages. Set `ARCHIVEDESK_TEST_PACKAGES` to newline-separated local paths and `ARCHIVEDESK_TEST_7ZZ` to the engine executable. RAR tests additionally use `ARCHIVEDESK_TEST_RAR`.
 
-The provided logo is packaged unchanged apart from resolution/format conversion. Rebuild its ICNS with `python3 scripts/build-icon.py`. The supplied artwork and third-party characters/marks are not licensed by the project's source-code license; no ownership or third-party clearance is asserted.
+The original supplied artwork is preserved in `Resources/AppIcon-source.png`. Build 14 uses a Dock-adjusted rendition with rounded corners and transparent margins; see [Dock icon notes](DOCK-ICON.md). Rebuild its ICNS with `python3 scripts/build-icon.py`. The supplied artwork and third-party characters/marks are not licensed by the project's source-code license; no ownership or third-party clearance is asserted.
 
 Implementation references:
 

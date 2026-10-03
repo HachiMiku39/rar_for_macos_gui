@@ -1,18 +1,18 @@
-# ArchiveDesk · 1.0 beta
+# ArchiveDesk · 1.0
 
 macOS 原生归档管理器，支持 macOS 14+、Apple Silicon 和 Intel。使用 SwiftUI 界面和独立命令行引擎，不自行实现 RAR 编解码。
 
 ## 安装
 
-打开 `ArchiveDesk-1.0.0-beta.3-universal.dmg`，把 ArchiveDesk 拖到 Applications。发布版本见 [Releases](https://github.com/HachiMiku39/rar_for_macos_gui/releases)。
+打开 `ArchiveDesk-1.0.0-universal.dmg`，把 ArchiveDesk 拖到 Applications。发布版本见 [Releases](https://github.com/HachiMiku39/rar_for_macos_gui/releases)。
 
-**beta.3：** 修复 Dock 图标的启动加载；CPU 主指标改为本软件占整机逻辑核心的比例（0–100%），另列活动监视器口径的进程 CPU（单核心满载为 100%，多核可超过 100%）。两项均统计 ArchiveDesk + 当前引擎，不包括其他应用。更新时先退出旧版本，再替换 Applications 中的应用。
+**1.0 正式版：** 采用圆角底板、透明留白的新 Dock 图标。CPU 主指标显示本软件占整机逻辑核心的比例（0–100%），另列活动监视器口径的进程 CPU（单核心满载为 100%，多核可超过 100%）。两项均统计 ArchiveDesk + 当前引擎，不包括其他应用。更新时先退出旧版本，再替换 Applications 中的应用。
 
-这是 **Beta、未经过 Developer ID 签名和公证** 的构建。如果 macOS 阻止打开，可用 Xcode 从源码构建；不需要关闭系统安全保护。本地候选包与 GitHub 发布状态分别管理。
+这是 **1.0 正式版，尚未经过 Developer ID 签名和公证**。正式发布状态不代表 Apple 已审核或公证。如果 macOS 阻止打开，可用 Xcode 从源码构建；不需要关闭系统安全保护。
 
-## 1.0 beta 新功能
+## 1.0 功能
 
-**beta.2 修复：** 压缩、解压、批量解压及归档测试开始时自动打开独立进度窗口，显示阶段百分比、CPU、RAM、磁盘读写速度、目标卷占用、用时及取消。任务结束保留结果；关闭窗口只隐藏，可从“工具 → 任务进度”或主窗口底部再次打开。不再仅依赖可能被弹层挡住的底部面板。
+压缩、解压、批量解压及归档测试开始时自动打开独立进度窗口，显示阶段百分比、CPU、RAM、磁盘读写速度、目标卷占用、用时及取消。任务结束保留结果；关闭窗口只隐藏，可从“工具 → 任务进度”或主窗口底部再次打开。
 
 - **批量解压与队列**：拖入多个压缩包，或“工具 → 批量解压”。逐个解压到同名目录；失败继续后续任务，支持排序、移除、取消整队。分卷只选首卷。
 - **应用到全部**：覆盖询问可将跳过、替换、重命名应用到当前压缩包的全部冲突。替换仍保留原文件旁置备份。
@@ -60,7 +60,7 @@ ARCHIVEDESK_TEST_ZIP_HELPER="$PWD/Resources/Tools/ArchiveDeskZIP" swift test
 
 ## 边界与许可
 
-Beta 尚无安全沙箱、暂停／断点续传、Finder 右键扩展、文件夹拖出或 100 GB 全场景验证。一般解压拒绝链接、特殊文件及大小写／Unicode 路径冲突；不承诺所有格式变体可用。取消可能保留已经完成的文件；临时文件清理不是安全擦除。不要将它当作已通过安全审计的恶意文件分析环境。
+1.0 尚无安全沙箱、暂停／断点续传、Finder 右键扩展、文件夹拖出或 100 GB 全场景验证。一般解压拒绝链接、特殊文件及大小写／Unicode 路径冲突；不承诺所有格式变体可用。取消可能保留已经完成的文件；临时文件清理不是安全擦除。不要将它当作已通过安全审计的恶意文件分析环境。
 
 7-Zip 26.03 的许可和完整对应源码在 [Resources/ThirdParty](Resources/ThirdParty)。手动 ZIP 编码通过独立适配器调用系统 libarchive；不打包系统库。项目与 RARLAB / WinRAR 无隶属关系。
 
@@ -68,6 +68,6 @@ Beta 尚无安全沙箱、暂停／断点续传、Finder 右键扩展、文件�
 
 ## English / 日本語
 
-Native macOS archive manager with batch extraction, checksums, Quick Look, legacy ZIP encodings and TAR creation. Unsigned Universal beta; RAR creation requires a separately acquired RARLAB CLI. Switch languages in Settings.
+Native macOS archive manager with batch extraction, checksums, Quick Look, legacy ZIP encodings and TAR creation. Version 1.0 is a stable Universal release, without Developer ID signing or notarization; RAR creation requires a separately acquired RARLAB CLI. Switch languages in Settings.
 
-一括展開、チェックサム、Quick Look、旧 ZIP 文字コード、TAR 作成に対応した macOS ネイティブアプリです。未署名の Universal ベータ版です。RAR 作成には別途 RARLAB CLI が必要です。
+一括展開、チェックサム、Quick Look、旧 ZIP 文字コード、TAR 作成に対応した macOS ネイティブアプリです。1.0 正式版は Universal 対応ですが、Developer ID 署名・公証は未実施です。RAR 作成には別途 RARLAB CLI が必要です。
