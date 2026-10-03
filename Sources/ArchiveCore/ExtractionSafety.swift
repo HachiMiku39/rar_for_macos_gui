@@ -6,6 +6,7 @@ public enum ExtractionSafety {
     public static func validate(_ entries: [ArchiveEntry], compressedBytes: UInt64 = 0) throws -> UInt64 {
         guard entries.count <= ArchiveResources.shared.budget.entryLimit else { throw ArchiveError.invalid("Archive entry index exceeds the current memory budget.") }
         var names = Set<String>(), files = Set<String>(), total: UInt64 = 0
+        var components: [String: Data] = [:]
         for item in entries {
             let parts = item.path.split(separator: "/", omittingEmptySubsequences: false)
             guard ArchiveCommands.safePath(item.path), !item.path.contains("\\"), !item.isLink,
@@ -14,6 +15,15 @@ public enum ExtractionSafety {
                 throw ArchiveError.details("Unsafe archive path: {0}", [item.path])
             }
             let key = item.path.trimmingCharacters(in: CharacterSet(charactersIn: "/")).decomposedStringWithCanonicalMapping.lowercased()
+            var prefix = ""
+            for part in parts where !part.isEmpty {
+                prefix = prefix.isEmpty ? String(part) : prefix + "/" + part
+                let normalized = prefix.decomposedStringWithCanonicalMapping.lowercased(), raw = Data(prefix.utf8)
+                if let previous = components[normalized], previous != raw {
+                    throw ArchiveError.invalid("Case or Unicode filename collision. Extraction was refused to avoid overwriting files.")
+                }
+                components[normalized] = raw
+            }
             guard names.insert(key).inserted else { throw ArchiveError.invalid("Case or Unicode filename collision. Extraction was refused to avoid overwriting files.") }
             if !item.isDirectory {
                 guard let size = UInt64(item.size), size <= UInt64(Int64.max), total <= UInt64(Int64.max) - size else { throw ArchiveError.invalid("Invalid uncompressed size.") }
@@ -35,7 +45,7 @@ public enum ExtractionSafety {
 
     /// Copy into a private sibling and publish only after the whole file is durable.
     /// The source was already verified by the decoder before merging starts.
-    public static func copyVerifiedFile(_ source: URL, to target: URL, replacing: Bool) throws -> Bool {
+    public static func copyVerifiedFile(_ source: URL, to target: URL, replacing: Bool, progress: (UInt64, UInt64) -> Void = { _, _ in }) throws -> Bool {
         let fm = FileManager.default
         try ExtractionMerger.checkDirectory(target.deletingLastPathComponent())
         let input = Darwin.open(source.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
@@ -49,6 +59,7 @@ public enum ExtractionSafety {
         guard output >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
         defer { close(output); try? fm.removeItem(at: partial) }
         var buffer = [UInt8](repeating: 0, count: 1024 * 1024), copied: Int64 = 0, untilCheck = 0
+        var lastProgress = ProcessInfo.processInfo.systemUptime
         while true {
             try Task.checkCancellation()
             let count = Darwin.read(input, &buffer, buffer.count)
@@ -63,6 +74,8 @@ public enum ExtractionSafety {
                 offset += written
             }
             copied += Int64(count); untilCheck += count
+            let now = ProcessInfo.processInfo.systemUptime
+            if now - lastProgress >= 0.2 { progress(UInt64(copied), UInt64(info.st_size)); lastProgress = now }
             if untilCheck >= 16 * 1024 * 1024 {
                 try DiskSpace.require(0, at: target.deletingLastPathComponent()); untilCheck = 0
             }
@@ -84,6 +97,7 @@ public enum ExtractionSafety {
             if let backup, !fm.fileExists(atPath: target.path) { try? fm.moveItem(at: backup, to: target) }
             throw ArchiveError.invalid("Cannot publish output; destination exists or is unavailable.")
         }
+        progress(UInt64(copied), UInt64(info.st_size))
         return backup != nil
     }
 }

@@ -9,7 +9,96 @@ public struct ArchiveTaskSnapshot {
     public var bytesRead: UInt64 = 0
     public var bytesWritten: UInt64 = 0
     public var currentFile = ""
+    public var fraction: Double?
     public var error: String?
+}
+
+/// Bounded incremental parsing, independent of diagnostic capture and password redaction.
+/// Only engine progress streams are passed here, never binary stdout or listings.
+final class EngineProgressDecoder {
+    private var line = [UInt8]()
+    private var dropping = false
+    private(set) var fraction: Double?
+    func feed(_ data: Data) {
+        for byte in data {
+            if byte == 13 || byte == 10 || byte == 8 {
+                parse(); line.removeAll(keepingCapacity: true); dropping = false
+            } else if !dropping {
+                if line.count < 4096 { line.append(byte) } else { line.removeAll(keepingCapacity: true); dropping = true }
+            }
+        }
+    }
+    func finish() { parse() }
+    private func parse() {
+        guard !dropping else { return }
+        let value = String(decoding: line, as: UTF8.self).trimmingCharacters(in: .whitespaces)
+        // 7-Zip: " 23% 42 - filename"; RAR: " 23%". Ignore arbitrary filenames containing %.
+        guard let percent = value.firstIndex(of: "%") else { return }
+        let digits = value[..<percent]
+        guard !digits.isEmpty, digits.count <= 3, digits.allSatisfy({ $0.isASCII && $0.isNumber }),
+              let number = Double(digits), (0...100).contains(number) else { return }
+        fraction = number / 100
+    }
+}
+
+public struct ResourceCounters {
+    private static let timebase: mach_timebase_info_data_t = {
+        var value = mach_timebase_info_data_t(); mach_timebase_info(&value); return value
+    }()
+    public var cpuNanoseconds: UInt64
+    public var memory: UInt64
+    public var read: UInt64
+    public var written: UInt64
+    public static func readProcess(_ pid: pid_t) -> ResourceCounters? {
+        var info = rusage_info_v2()
+        let result = withUnsafeMutablePointer(to: &info) { p in
+            p.withMemoryRebound(to: rusage_info_t?.self, capacity: 1) { proc_pid_rusage(pid, RUSAGE_INFO_V2, $0) }
+        }
+        guard result == 0 else { return nil }
+        // XNU task_power_info CPU times are Mach absolute ticks, not nanoseconds.
+        // Intel commonly uses 1:1; Apple Silicon does not.
+        let nanos = (Double(info.ri_user_time) + Double(info.ri_system_time)) * Double(timebase.numer) / Double(max(1, timebase.denom))
+        return .init(cpuNanoseconds: UInt64(min(nanos, Double(Int64.max))), memory: info.ri_resident_size,
+                     read: info.ri_diskio_bytesread, written: info.ri_diskio_byteswritten)
+    }
+}
+
+public struct ResourceSample {
+    public var cpuPercent: Double?
+    public var memory: UInt64?
+    public var readPerSecond: Double?
+    public var writePerSecond: Double?
+    public var capacity: UInt64?
+    public var free: UInt64?
+    public var elapsed: Double = 0
+    public init() {}
+}
+
+/// Single-owner sampler. CPU follows Activity Monitor: one fully used core = 100%.
+/// Track processes separately so starting/reaping a helper cannot cause rate spikes.
+public struct ResourceSampler {
+    private var previous: [String: ResourceCounters] = [:]
+    private var lastTime: Double?
+    public init() {}
+    public mutating func sample(_ counters: [String: ResourceCounters], at time: Double) -> ResourceSample {
+        defer { previous = counters; lastTime = time }
+        var result = ResourceSample()
+        guard !counters.isEmpty else { return result }
+        result.memory = counters.values.reduce(0) { $0 &+ $1.memory }
+        guard let lastTime, time > lastTime else { return result }
+        let duration = time - lastTime
+        var cpu = 0.0, read = 0.0, written = 0.0, valid = false
+        for (key, now) in counters {
+            guard let old = previous[key], now.cpuNanoseconds >= old.cpuNanoseconds,
+                  now.read >= old.read, now.written >= old.written else { continue }
+            valid = true
+            cpu += Double(now.cpuNanoseconds - old.cpuNanoseconds) / 1e9 / duration * 100
+            read += Double(now.read - old.read) / duration
+            written += Double(now.written - old.written) / duration
+        }
+        if valid { result.cpuPercent = cpu; result.readPerSecond = read; result.writePerSecond = written }
+        return result
+    }
 }
 
 public enum MemoryMode: String, CaseIterable { case adaptive, conservative, performance }
@@ -86,6 +175,14 @@ public final class CLIRunner: @unchecked Sendable {
     private var cancelled = false
     private var cancelAt: Date?
     private var observer: ((ArchiveTaskSnapshot) -> Void)?
+    private var runID = UUID()
+    public func resourceCounters() -> [String: ResourceCounters] {
+        // Sampling under the reap lock prevents accidentally sampling a recycled PID.
+        lock.withLock {
+            guard pid > 0, let value = ResourceCounters.readProcess(pid) else { return [:] }
+            return [runID.uuidString: value]
+        }
+    }
     public var observe: ((ArchiveTaskSnapshot) -> Void)? {
         get { lock.withLock { observer } }
         set { lock.withLock { observer = newValue } }
@@ -114,7 +211,7 @@ public final class CLIRunner: @unchecked Sendable {
         }
         let reserved = lock.withLock { () -> Bool in
             guard !active else { return false }
-            active = true; cancelled = false; cancelAt = nil; return true
+            active = true; cancelled = false; cancelAt = nil; runID = UUID(); return true
         }
         guard reserved else { throw ArchiveError.invalid("An engine task is already running.") }
         return try await withTaskCancellationHandler(operation: {
@@ -197,6 +294,9 @@ public final class CLIRunner: @unchecked Sendable {
         defer { if binaryFD >= 0 { close(binaryFD) }; if !committed, let partial { try? FileManager.default.removeItem(at: partial) } }
         let listing = arguments.first == "l" || arguments.first == "lt"
             ? ListingDecoder(backend: arguments.first == "lt" ? .rar : .sevenZip, limit: budget.entryLimit) : nil
+        let progressDecoder = EngineProgressDecoder()
+        let sevenZipProgress = arguments.contains("-bsp2")
+        let rarProgress = arguments.contains("-cfg-") && ["a", "x", "t"].contains(arguments.first ?? "")
         var stdout = Data(), stderr = Data(), buffer = [UInt8](repeating: 0, count: 65_536)
         var eofOut = false, eofErr = false, reaped = false, waitStatus: Int32 = 0
         var lastUpdate = Date.distantPast, lastMonitor = Date.distantPast, exitedAt: Date?
@@ -234,6 +334,9 @@ public final class CLIRunner: @unchecked Sendable {
                 }
                 state.bytesRead += UInt64(count)
                 let data = Data(buffer.prefix(count))
+                if (sevenZipProgress && isError) || (rarProgress && !isError && outputFile == nil) {
+                    progressDecoder.feed(data); state.fraction = progressDecoder.fraction
+                }
                 if !isError && outputFile != nil {
                     if failure == nil {
                         if let outputLimit, state.bytesWritten > UInt64(max(0, outputLimit)) || UInt64(count) > UInt64(max(0, outputLimit)) - state.bytesWritten {
@@ -264,21 +367,29 @@ public final class CLIRunner: @unchecked Sendable {
             // A helper that leaves descendants holding pipes cannot hang the app forever.
             if let exitedAt, now.timeIntervalSince(exitedAt) > 2 && (!eofOut || !eofErr) { failure = "Engine output pipes did not close."; break }
             if !reaped || !eofOut || !eofErr {
-                var p = [pollfd(fd: out.0, events: Int16(POLLIN), revents: 0), pollfd(fd: err.0, events: Int16(POLLIN), revents: 0)]
+                // A closed pipe is always readable; polling it causes an idle CPU spin.
+                var p = [pollfd(fd: eofOut ? -1 : out.0, events: Int16(POLLIN), revents: 0), pollfd(fd: eofErr ? -1 : err.0, events: Int16(POLLIN), revents: 0)]
                 _ = poll(&p, 2, 20)
             }
         }
         if failure == nil { do { try listing?.finish() } catch { failure = error.localizedDescription } }
+        progressDecoder.finish(); state.fraction = progressDecoder.fraction
         let wasCancelled = lock.withLock { cancelled }
         let status: Int32 = (waitStatus & 0x7f) == 0 ? (waitStatus >> 8) & 0xff : 128 + (waitStatus & 0x7f)
         if status == 0 && !wasCancelled && failure == nil, let partial, let outputFile {
             if fsync(binaryFD) != 0 { failure = "Unable to flush temporary output." }
-            else if Darwin.link(partial.path, outputFile.path) != 0 { failure = "Cannot publish output; destination exists or is unavailable." }
-            else { try? FileManager.default.removeItem(at: partial); committed = true }
+            else {
+                // Serialize cancellation with publication, including cancellation during fsync.
+                lock.withLock {
+                    if cancelled { return }
+                    if Darwin.link(partial.path, outputFile.path) != 0 { failure = "Cannot publish output; destination exists or is unavailable." }
+                    else { try? FileManager.default.removeItem(at: partial); committed = true }
+                }
+            }
         }
         let a = text(stdout) + (listing.map { text(Data(("\n" + $0.safetyFlags.sorted().joined(separator: "\n")).utf8)) } ?? ""), b = text(stderr) + (failure.map { "\n" + $0 } ?? "")
         update(a, b)
-        return CLIResult(status: failure == nil ? status : 2, stdout: a, stderr: b, cancelled: wasCancelled && failure == nil, listingOutput: "", parsedEntries: listing?.entries)
+        return CLIResult(status: failure == nil ? status : 2, stdout: a, stderr: b, cancelled: lock.withLock { cancelled } && failure == nil, listingOutput: "", parsedEntries: listing?.entries)
     }
 }
 
@@ -291,5 +402,14 @@ public enum DiskSpace {
     public static func hasReserve(at url: URL) -> Bool { available(at: url).map { $0 >= reserve } ?? false }
     public static func require(_ bytes: UInt64, at url: URL) throws {
         guard let free = available(at: url), free >= reserve, bytes <= free - reserve else { throw ArchiveError.invalid("Not enough disk space. The task stopped safely.") }
+    }
+    public static func requireStaging(_ bytes: UInt64, stage: URL, destination: URL) throws {
+        let a = try FileManager.default.attributesOfFileSystem(forPath: stage.path)
+        let b = try FileManager.default.attributesOfFileSystem(forPath: destination.path)
+        let same = (a[.systemNumber] as? NSNumber) == (b[.systemNumber] as? NSNumber)
+        let multiplied = bytes.multipliedReportingOverflow(by: same ? 2 : 1)
+        guard !multiplied.overflow else { throw ArchiveError.invalid("Invalid uncompressed size.") }
+        try require(multiplied.partialValue, at: stage)
+        if !same { try require(bytes, at: destination) }
     }
 }

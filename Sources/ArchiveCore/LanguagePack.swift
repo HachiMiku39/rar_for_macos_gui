@@ -1,6 +1,18 @@
 import Foundation
 
 public struct LanguagePack: Codable, Identifiable {
+    public static func readFile(_ url: URL) throws -> Data {
+        guard try url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile == true else { throw PackError.invalid("Invalid language pack metadata.") }
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        var data = Data()
+        while data.count <= 1_048_576 {
+            let chunk = try handle.read(upToCount: min(65_536, 1_048_577 - data.count)) ?? Data()
+            if chunk.isEmpty { return data }
+            data.append(chunk)
+        }
+        throw PackError.invalid("Language pack exceeds 1 MB.")
+    }
     public let schemaVersion: Int
     public let sourceLanguage: String?
     public let id: String

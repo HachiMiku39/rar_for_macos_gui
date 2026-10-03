@@ -142,7 +142,13 @@ public enum ArchiveEditor {
 
 public enum ExtractionPolicy: String, CaseIterable { case ask = "Ask before replacing", skip = "Skip existing files", rename = "Rename incoming files", replace = "Replace existing files", update = "Update older files" }
 public enum ConflictChoice { case replace, skip, rename, cancel }
-public struct ExtractionReport { public var written = 0; public var skipped = 0; public var renamed = 0; public var backups = 0 }
+public struct ExtractionReport {
+    public var written = 0; public var skipped = 0; public var renamed = 0; public var backups = 0
+    public var processedBytes: UInt64 = 0
+    public var totalBytes: UInt64 = 0
+    public var currentFile = ""
+    public var fraction: Double? { totalBytes > 0 ? min(1, Double(processedBytes) / Double(totalBytes)) : nil }
+}
 
 public enum ExtractionMerger {
     /// Refuse symlink ancestors rather than trusting string-prefix checks.
@@ -162,9 +168,24 @@ public enum ExtractionMerger {
         try checkDirectory(destination)
         guard let walk = fm.enumerator(at: stage, includingPropertiesForKeys: [.isDirectoryKey, .isRegularFileKey, .isSymbolicLinkKey]) else { throw ArchiveError.invalid("Cannot read extracted files.") }
         var files: [URL] = []
-        for case let file as URL in walk { files.append(file) }
+        for case let file as URL in walk { try Task.checkCancellation(); files.append(file) }
         files.sort { $0.path < $1.path }
         var report = ExtractionReport()
+        for file in files {
+            try Task.checkCancellation()
+            let values = try file.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
+            if values.isRegularFile == true {
+                let sum = report.totalBytes.addingReportingOverflow(UInt64(max(0, values.fileSize ?? 0)))
+                guard !sum.overflow else { throw ArchiveError.invalid("Invalid uncompressed size.") }
+                report.totalBytes = sum.partialValue
+            }
+        }
+        var lastUpdate = ProcessInfo.processInfo.systemUptime
+        func notify(_ force: Bool = false) {
+            let now = ProcessInfo.processInfo.systemUptime
+            if force || now - lastUpdate >= 0.2 { update(report); lastUpdate = now }
+        }
+        notify(true)
         var directories: [(URL, URL)] = []
         for file in files {
             try Task.checkCancellation()
@@ -172,6 +193,8 @@ public enum ExtractionMerger {
             guard full.hasPrefix(base + "/") else { throw ArchiveError.invalid("Unsafe extraction path.") }
             let relative = String(full.dropFirst(base.count + 1))
             guard ArchiveCommands.safePath(relative) else { throw ArchiveError.invalid("Unsafe extraction path.") }
+            report.currentFile = relative
+            let fileBytes = UInt64(max(0, (try? file.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0))
             let v = try file.resourceValues(forKeys: [.isDirectoryKey, .isRegularFileKey, .isSymbolicLinkKey, .contentModificationDateKey])
             guard v.isSymbolicLink != true, v.isDirectory == true || v.isRegularFile == true else { throw ArchiveError.invalid("Links and special files cannot be exported.") }
             var target = destination.appendingPathComponent(relative)
@@ -200,7 +223,7 @@ public enum ExtractionMerger {
                 try Task.checkCancellation()
                 switch choice {
                 case .cancel: throw CancellationError()
-                case .skip: report.skipped += 1; update(report); continue
+                case .skip: report.skipped += 1; report.processedBytes += fileBytes; notify(); continue
                 case .rename:
                     var n = 2
                     repeat { target = target.deletingLastPathComponent().appendingPathComponent((file.lastPathComponent as NSString).deletingPathExtension + " (\(n))" + (file.pathExtension.isEmpty ? "" : "." + file.pathExtension)); n += 1 } while fm.fileExists(atPath: target.path) || (try? target.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) == true
@@ -209,8 +232,11 @@ public enum ExtractionMerger {
                 }
             }
             try checkDirectory(target.deletingLastPathComponent())
-            if try ExtractionSafety.copyVerifiedFile(file, to: target, replacing: exists) { report.backups += 1 }
-            report.written += 1; update(report)
+            let before = report.processedBytes
+            if try ExtractionSafety.copyVerifiedFile(file, to: target, replacing: exists, progress: { copied, _ in
+                report.processedBytes = before + copied; notify()
+            }) { report.backups += 1 }
+            report.written += 1; notify()
         }
         // Finalize new directory modes/times only after their children have been written.
         for (source, target) in directories.reversed() {
@@ -221,7 +247,60 @@ public enum ExtractionMerger {
             try checkDirectory(target)
             try fm.setAttributes(kept, ofItemAtPath: target.path)
         }
-        return report
+        notify(true); return report
+    }
+}
+
+/// Build privately beside the destination; no final filename is visible on failure/cancel.
+public enum ArchiveCreator {
+    public static func create(output: URL, inputs: [URL], password: String, headers: Bool, volumeMB: Int, recovery: Int,
+                              options: CreationOptions, executable: String, runner: CLIRunner,
+                              phase: @escaping (String, Double?) -> Void = { _, _ in },
+                              update: @escaping (String, String) -> Void) async throws -> URL {
+        _ = try ArchiveCommands.create(output: output, inputs: inputs, password: password, headers: headers,
+                                       volumeMB: volumeMB, recovery: recovery, options: options)
+        let fm = FileManager.default, parent = output.deletingLastPathComponent()
+        try ExtractionMerger.checkDirectory(parent)
+        try DiskSpace.require(0, at: parent)
+        let stage = parent.appendingPathComponent(".ArchiveDesk-create-" + UUID().uuidString, isDirectory: true)
+        try fm.createDirectory(at: stage, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        defer { try? fm.removeItem(at: stage) }
+        let staged = stage.appendingPathComponent(output.lastPathComponent)
+        var creationOptions = options
+        creationOptions.testAfter = false // Verification is a separate visible phase, not a duplicate RAR -t pass.
+        let args = try ArchiveCommands.create(output: staged, inputs: inputs, password: password, headers: headers,
+                                              volumeMB: volumeMB, recovery: recovery, options: creationOptions)
+        func checked(_ result: CLIResult) throws {
+            if result.cancelled || Task.isCancelled { throw CancellationError() }
+            guard result.status == 0 else { throw ArchiveError.details("Engine exit code {0}. Check stderr/stdout. If the password is wrong, enter it and reload.", [String(result.status)]) }
+        }
+        phase("Compressing", nil)
+        try checked(try await runner.run(executable: executable, arguments: args, directory: inputs.first?.deletingLastPathComponent(), password: password, diskGuard: stage, update: update))
+        let generated = try fm.contentsOfDirectory(at: stage, includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey])
+            .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
+        guard !generated.isEmpty else { throw ArchiveError.invalid("No archive output was produced.") }
+        for file in generated {
+            let v = try file.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
+            guard v.isRegularFile == true, v.isSymbolicLink != true else { throw ArchiveError.invalid("Links and special files cannot be exported.") }
+        }
+        let first = volumeMB > 0 ? generated.first(where: { options.format == .rar ? $0.pathExtension == "rar" : $0.pathExtension == "001" }) : staged
+        guard let first else { throw ArchiveError.invalid("No archive output was produced.") }
+        if options.testAfter {
+            phase("Verifying", nil)
+            try checked(try await runner.run(executable: executable, arguments: ArchiveCommands.test(first, password: password, using: options.format == .rar ? .rar : .sevenZip), password: password, diskGuard: stage, update: update))
+        }
+        try Task.checkCancellation()
+        phase("Publishing files", nil)
+        if volumeMB > 0 {
+            let folder = parent.appendingPathComponent(output.deletingPathExtension().lastPathComponent + "-parts-" + UUID().uuidString)
+            try ExtractionMerger.checkDirectory(parent)
+            guard renamex_np(stage.path, folder.path, UInt32(RENAME_EXCL)) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+            phase("Publishing files", 1); return folder
+        }
+        _ = try ExtractionSafety.copyVerifiedFile(staged, to: output, replacing: false) { bytes, total in
+            phase("Publishing files", total > 0 ? Double(bytes) / Double(total) : nil)
+        }
+        return output
     }
 }
 

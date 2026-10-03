@@ -177,11 +177,11 @@ public enum ArchiveCommands {
         try literalSelection(selected)
         let p = try passwordSwitch(password)
         if (engine ?? backend(archive)) == .rar { return ["x", "-cfg-", "-o-", "-ol-", "-idc", p, "--", archive.path] + selected + [destination.path + "/"] }
-        return ["x", "-aos", "-sccUTF-8", "-o" + destination.path] + resourceSwitches(archive) + ["--", archive.path] + selected
+        return ["x", "-aos", "-bsp2", "-sccUTF-8", "-o" + destination.path] + resourceSwitches(archive) + ["--", archive.path] + selected
     }
     public static func test(_ archive: URL, password: String, using engine: Backend? = nil) throws -> [String] {
         let p = try passwordSwitch(password)
-        return (engine ?? backend(archive)) == .rar ? ["t", "-cfg-", "-idc", p, "--", archive.path] : ["t", "-sccUTF-8"] + resourceSwitches(archive) + ["--", archive.path]
+        return (engine ?? backend(archive)) == .rar ? ["t", "-cfg-", "-idc", p, "--", archive.path] : ["t", "-bsp2", "-sccUTF-8"] + resourceSwitches(archive) + ["--", archive.path]
     }
     public static func create(output: URL, inputs: [URL], password: String, headers: Bool, volumeMB: Int, recovery: Int, options: CreationOptions = CreationOptions()) throws -> [String] {
         guard !inputs.isEmpty, (0...1_000_000).contains(volumeMB), (0...100).contains(recovery) else { throw ArchiveError.invalid("Select files; volume size must be 0–1000000 MB and recovery record 0–100%.") }
@@ -197,14 +197,14 @@ public enum ArchiveCommands {
         let patterns = try options.validatedPatterns()
         _ = try passwordSwitch(password)
         if options.format != .rar {
-            var args = ["a", "-t" + options.format.rawValue, "-mx=\([0,1,3,5,7,9][options.level])", "-sccUTF-8"]
+            var args = ["a", "-t" + options.format.rawValue, "-mx=\([0,1,3,5,7,9][options.level])", "-sccUTF-8", "-bsp2"]
             if !password.isEmpty {
                 args.append("-p")
                 if options.format == .zip { args.append("-mem=AES256") }
                 else if headers { args.append("-mhe=on") }
             }
             if options.format == .sevenZip { args.append(options.solid ? "-ms=on" : "-ms=off") }
-            if options.threads > 0 { args.append("-mmt=\(options.threads)") }
+            args.append("-mmt=\(options.threads > 0 ? min(options.threads, ArchiveResources.shared.budget.workers) : ArchiveResources.shared.budget.workers)")
             if volumeMB > 0 { args.append("-v\(volumeMB)m") }
             args += patterns.map { "-xr!" + $0 }
             return args + ["--", output.path] + inputs.map { "./" + $0.lastPathComponent }
