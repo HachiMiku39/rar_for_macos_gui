@@ -35,7 +35,17 @@ jobs:
           git archive --format=zip --prefix=ArchiveDesk/ HEAD -o "dist/ArchiveDesk-${RELEASE_VERSION}-source.zip"
           cd dist
           shasum -a 256 "ArchiveDesk-${RELEASE_VERSION}-universal.dmg" "ArchiveDesk-${RELEASE_VERSION}-universal.zip" "ArchiveDesk-${RELEASE_VERSION}-source.zip" > "ArchiveDesk-${RELEASE_VERSION}-SHA256SUMS.txt"
-          hdiutil verify "ArchiveDesk-${RELEASE_VERSION}-universal.dmg"
+          # DiskImages can briefly retain the image after creation on hosted macOS.
+          # Retry, but never publish an image that has not passed verification.
+          image_verified=false
+          for attempt in 1 2 3 4 5; do
+            if hdiutil verify "ArchiveDesk-${RELEASE_VERSION}-universal.dmg"; then
+              image_verified=true
+              break
+            fi
+            if [[ "$attempt" -lt 5 ]]; then sleep 5; fi
+          done
+          [[ "$image_verified" == true ]]
           unzip -tq "ArchiveDesk-${RELEASE_VERSION}-universal.zip"
       - name: Publish release
         env:
