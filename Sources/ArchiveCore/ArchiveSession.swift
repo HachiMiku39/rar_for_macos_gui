@@ -2,6 +2,24 @@ import Foundation
 import CryptoKit
 import Darwin
 
+/// Browsing history is session-only: never restore or persist archive paths.
+public struct RecentArchiveHistory {
+    public private(set) var urls: [URL] = []
+
+    public init(defaults: UserDefaults = .standard) {
+        // Migrate old installations without touching unrelated preferences.
+        defaults.removeObject(forKey: "recentArchives")
+    }
+
+    public mutating func record(_ url: URL) {
+        urls.removeAll { $0 == url }
+        urls.insert(url, at: 0)
+        urls = Array(urls.prefix(10))
+    }
+
+    public mutating func clear() { urls.removeAll() }
+}
+
 public enum ArchiveEdit {
     case add([URL]), delete([String]), rename(String, String)
 }

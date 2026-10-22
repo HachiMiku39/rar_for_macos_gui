@@ -1,14 +1,34 @@
-# ArchiveDesk · 1.0
+# ArchiveDesk · 1.1 Beta
 
 macOS 原生归档管理器，支持 macOS 14+、Apple Silicon 和 Intel。使用 SwiftUI 界面和独立命令行引擎，不自行实现 RAR 编解码。
 
+## 1.1.0-beta.3（build 18）
+
+- 修复加密归档内文件的预览密码流程：文件名可见不代表内容已解密；双击或按空格预览时请求密码，密码错误可重试，取消不会留下可预览的明文。
+- “最近打开”仅保留在当前运行的内存中，不再写入设置或主动注册系统最近文稿；退出 App（⌘Q）后自动清除，下次启动不恢复，并清理旧版保存的记录。关闭窗口不等于退出 App。
+- 保留以下媒体预览和 Miku 配色功能。下载与完整说明见 [本版发布页](https://github.com/HachiMiku39/rar_for_macos_gui/releases/tag/v1.1.0-beta.3)。
+
+**新增 Miku 配色**：窗口右上角“外观”或设置 → 配色主题 → **Miku · 葱绿与粉色**。青绿色强调、粉色点缀与轻染色玻璃面板，主窗口、预览和任务进度窗口统一适配。主题与浅色／深色／跟随系统独立，可随时恢复标准配色；选择会自动保存。尊重系统“降低透明度”设置，不修改 Dock 图标或文件内容。
+
+将 iOS 新版的媒体预览交互带到 Mac：双击文件、选中后按空格，或右键 → **预览**。
+
+- 视频／音频：播放、暂停、拖动时间轴、音量；视频支持原生全屏控件，音频支持前后跳转 15 秒。
+- 音乐信息：标题、艺术家、专辑等系统能识别的标签，以及内嵌 JPEG／PNG 封面。
+- 图片：按窗口缩略显示、处理图片方向；动图只显示第一帧。
+- 文本：只读 UTF-8 / 带 BOM 的 UTF-16，最多预览前 256 KiB，支持复制；HTML／SVG／源码仅显示文字，不执行。
+- 关闭预览即停止播放器并删除其临时副本；预览失败不影响压缩包浏览。原来的 **Quick Look**、**打开选中项**（系统默认应用）和拖出文件仍保留。
+
+macOS 使用 **AVFoundation / AVKit / ImageIO**，不是 iOS 的 FFmpeg 解码器移植：MKV、WebM、AV1 等是否可播放取决于系统与编码，不能保证与 iOS 完全一致。解压能力不受此限制；不支持的媒体会提示解压后使用其他播放器。此开发版没有新增第三方媒体二进制依赖。
+
+范围、安全边界及验证方法见 [媒体预览说明](docs/MEDIA-PREVIEW.md) 和 [验证记录](VALIDATION.md)。
+
 ## 安装
 
-打开 `ArchiveDesk-1.0.0-universal.dmg`，把 ArchiveDesk 拖到 Applications。发布版本见 [Releases](https://github.com/HachiMiku39/rar_for_macos_gui/releases)。
+测试新版请下载 `ArchiveDesk-1.1.0-beta.3-universal.dmg`，退出旧 App 后把 ArchiveDesk 拖到 Applications 替换；也提供应用 ZIP、源码 ZIP 和 SHA-256 校验文件。需要旧正式版可继续下载 1.0.0。全部版本见 [Releases](https://github.com/HachiMiku39/rar_for_macos_gui/releases)。
 
 **1.0 正式版：** 采用圆角底板、透明留白的新 Dock 图标。CPU 主指标显示本软件占整机逻辑核心的比例（0–100%），另列活动监视器口径的进程 CPU（单核心满载为 100%，多核可超过 100%）。两项均统计 ArchiveDesk + 当前引擎，不包括其他应用。更新时先退出旧版本，再替换 Applications 中的应用。
 
-这是 **1.0 正式版，尚未经过 Developer ID 签名和公证**。正式发布状态不代表 Apple 已审核或公证。如果 macOS 阻止打开，可用 Xcode 从源码构建；不需要关闭系统安全保护。
+**1.1 为测试版，尚未经过 Developer ID 签名和 Apple 公证。** 安装包仅有本地 ad-hoc 签名，不代表 Apple 已审核，也不是 Developer ID 分发签名。如果 macOS 阻止打开，可用 Xcode 从源码构建；不需要关闭系统安全保护。旧 1.0 正式版也未经过公证。
 
 ## 1.0 功能
 
@@ -26,6 +46,7 @@ macOS 原生归档管理器，支持 macOS 14+、Apple Silicon 和 Intel。使�
 
 ## 已有功能
 
+- “最近打开”仅在当前运行期间保留，退出 App 后自动清除，下次启动不恢复；旧版本保存的浏览记录会清理，不影响原始文件及其他设置。
 - 内置 7-Zip，浏览、解压、测试 RAR / ZIP / 7z / TAR / ISO 等；支持密码、选中项解压、文件夹导航与类型图标。
 - RAR5 / ZIP / 7z 创建、压缩级别、排除规则、压缩后测试；RAR5 / 7z 文件名加密、RAR 恢复记录与恢复卷。
 - 向未加密单卷 RAR / ZIP / 7z 添加、删除、重命名文件；在副本上修改并保留原包备份。编辑有容量限制。
@@ -68,6 +89,6 @@ ARCHIVEDESK_TEST_ZIP_HELPER="$PWD/Resources/Tools/ArchiveDeskZIP" swift test
 
 ## English / 日本語
 
-Native macOS archive manager with batch extraction, checksums, Quick Look, legacy ZIP encodings and TAR creation. Version 1.0 is a stable Universal release, without Developer ID signing or notarization; RAR creation requires a separately acquired RARLAB CLI. Switch languages in Settings.
+Native macOS archive manager with batch extraction, checksums, Quick Look, legacy ZIP encodings and TAR creation. Version 1.1.0-beta.3 (build 18) adds media previews, encrypted-entry password prompts and session-only history. Universal macOS 14+; ad-hoc signed, without Developer ID signing or notarization. RAR creation requires a separately acquired RARLAB CLI. Switch languages in Settings.
 
-一括展開、チェックサム、Quick Look、旧 ZIP 文字コード、TAR 作成に対応した macOS ネイティブアプリです。1.0 正式版は Universal 対応ですが、Developer ID 署名・公証は未実施です。RAR 作成には別途 RARLAB CLI が必要です。
+一括展開、チェックサム、Quick Look、旧 ZIP 文字コード、TAR 作成に対応した macOS ネイティブアプリです。1.1.0-beta.3（build 18）はメディアプレビュー、暗号化ファイルのパスワード入力、終了時の閲覧履歴消去に対応します。Universal 対応ですが Developer ID 署名・公証は未実施です。RAR 作成には別途 RARLAB CLI が必要です。

@@ -18,6 +18,7 @@ struct ContentView: View {
                     Image(systemName: "folder").foregroundStyle(.tint)
                     Text(model.archive?.path ?? "ArchiveDesk").lineLimit(1).truncationMode(.middle).textSelection(.enabled)
                     Spacer()
+                    if model.usesMikuTheme { MikuThemeBadge() }
                     Text(language.text("{0} items", String(model.entries.count))).foregroundStyle(.secondary)
                 }.padding(12)
                 if model.archive != nil { navigationBar }
@@ -100,7 +101,8 @@ struct ContentView: View {
                     Button(language.text("Task queue")) { model.showQueue = true }
                     Button(language.text("Task progress")) { model.showTaskProgress() }.disabled(!model.hasTaskReport)
                     Button(language.text("File checksums")) { model.showChecksums = true }.disabled(model.busy)
-                    Button(language.text("Quick Look")) { if let item = model.selectedEntry { model.preview(item) } }.disabled(model.busy || model.selectedEntry == nil)
+                    Button(language.text("Preview")) { if let item = model.selectedEntry { model.preview(item) } }.disabled(model.busy || model.selectedEntry == nil)
+                    Button(language.text("Quick Look")) { if let item = model.selectedEntry { model.quickLook(item) } }.disabled(model.busy || model.selectedEntry?.canOpenCopy != true)
                 } label: { Label(language.text("Tools"), systemImage: "wrench.and.screwdriver") }
             }
             ToolbarItem {
@@ -113,6 +115,8 @@ struct ContentView: View {
                         Text(language.text("Light")).tag("light")
                         Text(language.text("Dark")).tag("dark")
                     }
+                    Divider()
+                    ArchiveThemePicker()
                 } label: { Label(language.text("Appearance"), systemImage: "circle.lefthalf.filled") }
             }
         }
@@ -125,6 +129,7 @@ struct ContentView: View {
         .quickLookPreview($model.quickLookURL)
         .alert(language.text("Operation Unsuccessful"), isPresented: Binding(get: { model.error != nil }, set: { if !$0 { model.error = nil } })) { Button(language.text("OK")) { model.error = nil } } message: { Text(language.text(model.error ?? "")) }
         .frame(minWidth: 900, minHeight: 600)
+        .archiveTheme(miku: model.usesMikuTheme)
     }
     private var navigationBar: some View {
         HStack(spacing: 12) {
@@ -169,8 +174,11 @@ struct ContentView: View {
             TableColumn(language.text("Modified"), value: \ArchiveEntry.modified).width(170)
         }
         .contextMenu(forSelectionType: String.self) { ids in
-            Button(language.text("Quick Look")) {
+            Button(language.text("Preview")) {
                 if let item = model.visible.first(where: { ids.contains($0.id) }) { model.preview(item) }
+            }.disabled(ids.count != 1 || model.busy)
+            Button(language.text("Quick Look")) {
+                if let item = model.visible.first(where: { ids.contains($0.id) }) { model.quickLook(item) }
             }.disabled(ids.count != 1 || model.busy)
             Button(language.text("Open Selected Item")) {
                 if let item = model.visible.first(where: { ids.contains($0.id) }) { model.activate(item) }
@@ -180,11 +188,15 @@ struct ContentView: View {
             Button(language.text("Delete from Archive…")) { model.selection = ids; model.deleteFromArchive() }.disabled(!model.canEdit || ids.isEmpty)
             Button(language.text("Rename in Archive…")) { model.selection = ids; model.renameInArchive() }.disabled(!model.canEdit || ids.count != 1 || model.visible.contains { ids.contains($0.id) && $0.isDirectory })
         } primaryAction: { ids in
-            if ids.count == 1, let item = model.visible.first(where: { ids.contains($0.id) }) { model.activate(item) }
+            if ids.count == 1, let item = model.visible.first(where: { ids.contains($0.id) }) { model.activateInBrowser(item) }
         }
         .onKeyPress(.return) {
             guard let item = model.selectedEntry else { return .ignored }
-            model.activate(item); return .handled
+            model.activateInBrowser(item); return .handled
+        }
+        .onKeyPress(.space) {
+            guard !model.busy, let item = model.selectedEntry, !item.isDirectory else { return .ignored }
+            model.preview(item); return .handled
         }
     }
     private var sidebar: some View {
@@ -200,6 +212,8 @@ struct ContentView: View {
                 ForEach(model.recent, id: \.self) { url in
                     Button(url.lastPathComponent) { model.open(url) }.help(url.path)
                 }
+                Text(language.text("History is cleared when ArchiveDesk quits."))
+                    .font(.caption).foregroundStyle(.secondary)
             }
             Section(language.text("Supported Formats")) {
                 Text(language.text("7-Zip 26.03 included"))
@@ -207,7 +221,7 @@ struct ContentView: View {
                 Text("RAR · ZIP · 7z · TAR · ISO")
                 Text("CAB · ARJ · LZH · GZ · UUE…")
             }.foregroundStyle(.secondary).font(.caption)
-        }
+        }.scrollContentBackground(model.usesMikuTheme ? .hidden : .automatic)
     }
     func logPane(_ title: String, text: String) -> some View {
         VStack(alignment: .leading, spacing: 5) {
@@ -405,6 +419,7 @@ struct SettingsView: View {
     @EnvironmentObject var language: AppLanguage
     var body: some View {
         Form {
+            ArchiveThemePicker()
             Picker(language.text("Appearance"), selection: $model.appearance) {
                 Text(language.text("System Default")).tag("system")
                 Text(language.text("Light")).tag("light")
@@ -457,12 +472,3 @@ struct SettingsView: View {
     }
 }
 
-extension View {
-    @ViewBuilder func archiveGlass() -> some View {
-        if #available(macOS 26.0, *) {
-            self.glassEffect(.regular, in: .rect(cornerRadius: 14))
-        } else {
-            self.background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
-        }
-    }
-}

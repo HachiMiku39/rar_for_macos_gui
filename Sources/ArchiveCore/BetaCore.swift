@@ -159,6 +159,24 @@ public enum BatchExtractor {
     }
 }
 
+public enum FileExportPasswordError: LocalizedError, Equatable {
+    case required, incorrect
+    public var errorDescription: String? {
+        switch self {
+        case .required: return "Password required"
+        case .incorrect: return "Incorrect password. Try again."
+        }
+    }
+    static func isPasswordFailure(_ result: CLIResult) -> Bool {
+        guard result.status != 0, !result.cancelled else { return false }
+        // 7zz writes progress/backspaces immediately before ERROR without a newline.
+        let diagnostic = result.stderr.lowercased()
+        return diagnostic.contains("error: wrong password") ||
+            diagnostic.contains("error: data error in encrypted file. wrong password") ||
+            diagnostic.contains("error: password is incorrect")
+    }
+}
+
 public enum SingleFileExporter {
     public static func export(_ item: ArchiveEntry, entries: [ArchiveEntry], source: URL, root: URL, engine: String,
                               password: String, encoding: ZIPNameEncoding, runner: CLIRunner,
@@ -166,11 +184,13 @@ public enum SingleFileExporter {
         _ = try ExtractionSafety.validate(entries)
         try ArchiveCommands.literalSelection([item.path])
         guard !item.isDirectory, !item.isLink, let size = UInt64(item.size), size <= PreviewSafety.maximumBytes else { throw ArchiveError.invalid("Drag export and Quick Look support regular files up to 512 MiB.") }
+        guard !item.isEncrypted || !password.isEmpty else { throw FileExportPasswordError.required }
         try DiskSpace.require(size, at: root)
         let target = root.appendingPathComponent(item.name)
         let args = ["x", "-so", "-spd", "-bsp2"] + encoding.switches(for: source) + ArchiveCommands.resourceSwitches(source) + ["--", source.path, item.path]
         let result = try await runner.run(executable: engine, arguments: args, password: password, outputFile: target, outputLimit: Int(size), diskGuard: root, update: update)
         if result.cancelled { throw CancellationError() }
+        if FileExportPasswordError.isPasswordFailure(result) { throw FileExportPasswordError.incorrect }
         guard result.status == 0, (try target.resourceValues(forKeys: [.fileSizeKey]).fileSize) == Int(size) else { throw ArchiveError.invalid("File export failed. Check the task log.") }
         return target
     }

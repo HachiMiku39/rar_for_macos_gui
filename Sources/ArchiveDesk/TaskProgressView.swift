@@ -66,7 +66,7 @@ struct TaskProgressView: View {
                 }
             }
         }.padding(20).frame(width: 650).fixedSize(horizontal: false, vertical: true)
-            .preferredColorScheme(model.colorScheme).environment(\.locale, language.locale)
+            .archiveTheme(miku: model.usesMikuTheme).preferredColorScheme(model.colorScheme).environment(\.locale, language.locale)
     }
 }
 

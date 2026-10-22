@@ -15,6 +15,9 @@ for binary in "$stage_dir/ArchiveDesk.app/Contents/MacOS/ArchiveDesk" "$stage_di
   [[ "$architectures" == *" arm64 "* && "$architectures" == *" x86_64 "* ]]
 done
 test -s "$stage_dir/ArchiveDesk.app/Contents/Resources/AppIcon.icns"
+# Ad-hoc signing provides bundle integrity only, not Developer ID or notarization.
+codesign --force --sign - "$stage_dir/ArchiveDesk.app"
+codesign --verify --deep --strict "$stage_dir/ArchiveDesk.app"
 hdiutil create -volname ArchiveDesk -srcfolder "$stage_dir" -ov -format UDZO "$release_dir/ArchiveDesk-${version}-universal.dmg"
 ditto -c -k --norsrc --keepParent "$stage_dir/ArchiveDesk.app" "$release_dir/ArchiveDesk-${version}-universal.zip"
 shasum -a 256 "$release_dir/ArchiveDesk-${version}-universal.dmg" "$release_dir/ArchiveDesk-${version}-universal.zip"

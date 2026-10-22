@@ -8,6 +8,11 @@ public struct ArchiveEntry: Identifiable, Hashable, Sendable {
     public let modified: String
     public let isDirectory: Bool
     public let isLink: Bool
+    public let isEncrypted: Bool
+    public init(path: String, size: String, modified: String, isDirectory: Bool, isLink: Bool, isEncrypted: Bool = false) {
+        self.path = path; self.size = size; self.modified = modified
+        self.isDirectory = isDirectory; self.isLink = isLink; self.isEncrypted = isEncrypted
+    }
 }
 
 public enum ArchiveError: LocalizedError {
@@ -228,7 +233,7 @@ public enum ArchiveCommands {
         func flush() {
             let key = backend == .rar ? "Name" : "Path"
             if let path = fields[key], !path.isEmpty, fields["Type"] != "RAR 5", fields["Type"] != "RAR 4", !(backend == .sevenZip && fields["Type"] != nil) {
-                entries.append(ArchiveEntry(path: path, size: fields["Size"] ?? "", modified: fields["mtime"] ?? fields["Modified"] ?? "", isDirectory: fields["Type"] == "Directory" || fields["Folder"] == "+" || (fields["Attributes"] ?? "").hasPrefix("D"), isLink: fields.contains(where: { $0.key.lowercased().contains("link") && !$0.value.isEmpty }) || (fields["Type"] ?? "").lowercased().contains("link") || (fields["Mode"] ?? "").hasPrefix("l") || (fields["Attributes"] ?? "").split(separator: " ").contains(where: { $0.count == 10 && $0.hasPrefix("l") })))
+                entries.append(ArchiveEntry(path: path, size: fields["Size"] ?? "", modified: fields["mtime"] ?? fields["Modified"] ?? "", isDirectory: fields["Type"] == "Directory" || fields["Folder"] == "+" || (fields["Attributes"] ?? "").hasPrefix("D"), isLink: fields.contains(where: { $0.key.lowercased().contains("link") && !$0.value.isEmpty }) || (fields["Type"] ?? "").lowercased().contains("link") || (fields["Mode"] ?? "").hasPrefix("l") || (fields["Attributes"] ?? "").split(separator: " ").contains(where: { $0.count == 10 && $0.hasPrefix("l") }), isEncrypted: fields["Encrypted"] == "+" || (fields["Flags"] ?? "").lowercased().contains("encrypted")))
             }
             fields = [:]
         }

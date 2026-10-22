@@ -12,6 +12,8 @@ import ArchiveCore
     @Published var selection: Set<String> = []
     @Published var zipEncoding: ZIPNameEncoding = .auto
     @Published var quickLookURL: URL?
+    let filePreview = PreviewSession()
+    private lazy var previewWindow = FilePreviewWindowController(model: self)
     @Published var showQueue = false
     @Published var showChecksums = false
     @Published var queue: [BatchArchive] = []
@@ -54,7 +56,8 @@ import ArchiveCore
     var canEdit: Bool { archive != nil && editRefusal.isEmpty && !busy && !inspecting }
     @Published var inputs: [URL] = []
     @Published var error: String? { didSet { if busy && error != nil { taskHadError = true } } }
-    @Published var recent: [URL] = (UserDefaults.standard.stringArray(forKey: "recentArchives") ?? []).map { URL(fileURLWithPath: $0) }
+    @Published private var recentHistory = RecentArchiveHistory()
+    var recent: [URL] { recentHistory.urls }
     @Published var directory = "" { didSet { refreshVisible() } }
     @Published var packageKind: PackageKind?
     @Published var packageReport: PackageReport?
@@ -70,6 +73,10 @@ import ArchiveCore
         didSet { UserDefaults.standard.set(appearance, forKey: "appearance") }
     }
     var colorScheme: ColorScheme? { appearance == "light" ? .light : appearance == "dark" ? .dark : nil }
+    @Published var colorTheme = UserDefaults.standard.string(forKey: "colorTheme") == "miku" ? "miku" : "standard" {
+        didSet { UserDefaults.standard.set(colorTheme, forKey: "colorTheme") }
+    }
+    var usesMikuTheme: Bool { colorTheme == "miku" }
     private var openedCopies: [URL] = []
     @Published var rar = UserDefaults.standard.string(forKey: "rar") ?? "/opt/homebrew/bin/rar"
     @Published var unrar = UserDefaults.standard.string(forKey: "unrar") ?? "/opt/homebrew/bin/unrar"
@@ -151,12 +158,13 @@ import ArchiveCore
     func navigate(_ path: String) { directory = path; selection = []; filter = "" }
     func goUp() { navigate((directory as NSString).deletingLastPathComponent) }
     func clearRecent() {
-        recent = []
+        recentHistory.clear()
         UserDefaults.standard.removeObject(forKey: "recentArchives")
         NSDocumentController.shared.clearRecentDocuments(nil)
         status = language.text("History cleared. Original files were not deleted.")
     }
     func cleanOpenedCopies() {
+        closePreview()
         for url in openedCopies { try? FileManager.default.removeItem(at: url) }
         openedCopies = []
     }
@@ -164,6 +172,7 @@ import ArchiveCore
         guard !busy else { return }
         if item.isDirectory { navigate(item.path); return }
         guard item.canOpenCopy else { error = language.text("This type cannot be opened directly. Extract it first and inspect it yourself."); return }
+        closePreview()
         let notice = NSAlert(); notice.messageText = language.text("Open a temporary copy?")
         notice.informativeText = language.text("The system default app will open this copy. Open only trusted files. Edits are not saved back to the archive; temporary copies are removed when ArchiveDesk quits.")
         notice.addButton(withTitle: language.text("Open")); notice.addButton(withTitle: language.text("Cancel"))
@@ -174,32 +183,105 @@ import ArchiveCore
     }
     func savePaths() { for (key, value) in [("rar", rar), ("sevenZipOverrideV2", sevenZip)] { UserDefaults.standard.set(value, forKey: key) } }
     func preview(_ item: ArchiveEntry) {
+        guard !busy else { return }
+        if item.isDirectory { navigate(item.path); return }
+        guard let kind = item.previewKind else { quickLook(item); return }
+        closePreview()
+        let id = filePreview.begin(name: item.name, kind: kind)
+        previewWindow.show()
+        guard let size = UInt64(item.size), size <= PreviewSafety.maximumBytes,
+              kind != .image || size <= FilePreviewContent.imageLimit else {
+            filePreview.fail(kind == .image ? "Image preview is limited to 32 MiB and 32 million pixels." : "Drag export and Quick Look support regular files up to 512 MiB.", requestID: id)
+            return
+        }
+        prepareCopy(item, inspect: true, requestID: id, retainUntilQuit: false) { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case .success(let url): self.filePreview.load(url, ownedRoot: url.deletingLastPathComponent(), requestID: id)
+            case .failure(let error):
+                if error is CancellationError {
+                    if self.filePreview.requestID == id { self.closePreview() }
+                } else { self.filePreview.fail(self.language.message(error), requestID: id) }
+            }
+        }
+    }
+    func closePreview() {
+        if let id = filePreview.requestID, copyRequestID == id { cancelCurrentTask() }
+        filePreview.close(); previewWindow.hide()
+    }
+    func activateInBrowser(_ item: ArchiveEntry) {
+        if item.previewKind != nil { preview(item) } else { activate(item) }
+    }
+    func quickLook(_ item: ArchiveEntry) {
         guard item.canOpenCopy else { error = language.text("This type cannot be previewed. Extract it to inspect it yourself."); return }
+        guard !busy else { return }
+        closePreview()
         prepareCopy(item, inspect: true) { result in if case .success(let url) = result { self.quickLookURL = url } }
     }
-    private func prepareCopy(_ item: ArchiveEntry, inspect: Bool, requestID: UUID = UUID(), completion: @escaping (Result<URL, Error>) -> Void) {
+    private func prepareCopy(_ item: ArchiveEntry, inspect: Bool, requestID: UUID = UUID(), retainUntilQuit: Bool = true, completion: @escaping (Result<URL, Error>) -> Void) {
         guard !busy, let source = session?.workingURL ?? archive else { completion(.failure(ArchiveError.invalid("Another task is running."))); return }
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent("ArchiveDesk-open-" + UUID().uuidString)
-        do { try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700]) }
-        catch { completion(.failure(error)); return }
-        let rows = entries, engine = resolvedSevenZip, secret = password, encoding = zipEncoding, engineRunner = runner
+        let rows = entries, engine = resolvedSevenZip, encoding = zipEncoding, engineRunner = runner
+        var secret = password
         busy = true; copyRequestID = requestID; status = language.text("Preparing file export")
         exportTask = Task {
             defer { copyRequestID = nil; busy = false; progress = nil }
-            do {
-                let work = Task.detached(priority: .userInitiated) {
-                    let file = try await SingleFileExporter.export(item, entries: rows, source: source, root: root, engine: engine, password: secret, encoding: encoding, runner: engineRunner) { a, b in
-                        Task { @MainActor in self.stdout = a; self.stderr = b }
+            while !Task.isCancelled {
+                let root = FileManager.default.temporaryDirectory.appendingPathComponent("ArchiveDesk-open-" + UUID().uuidString)
+                do {
+                    try Task.checkCancellation()
+                    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+                    let attemptSecret = secret
+                    let work = Task.detached(priority: .userInitiated) {
+                        let file = try await SingleFileExporter.export(item, entries: rows, source: source, root: root, engine: engine, password: attemptSecret, encoding: encoding, runner: engineRunner) { a, b in
+                            Task { @MainActor in self.stdout = a; self.stderr = b }
+                        }
+                        if inspect { try PreviewSafety.validate(file, inside: root) }
+                        return file
                     }
-                    if inspect { try PreviewSafety.validate(file, inside: root) }
-                    return file
+                    let file = try await withTaskCancellationHandler(operation: { try await work.value }, onCancel: { work.cancel(); engineRunner.cancel() })
+                    try Task.checkCancellation()
+                    if retainUntilQuit { openedCopies.append(root) }
+                    password = attemptSecret
+                    status = language.text("Temporary copy ready. Changes are not saved to the archive."); completion(.success(file))
+                    return
+                } catch {
+                    try? FileManager.default.removeItem(at: root)
+                    if let failure = error as? FileExportPasswordError, !Task.isCancelled {
+                        password = ""
+                        guard let replacement = requestExportPassword(item, retry: failure == .incorrect), !Task.isCancelled else {
+                            status = language.text("cancelled"); completion(.failure(CancellationError())); return
+                        }
+                        secret = replacement
+                        continue
+                    }
+                    if retainUntilQuit && !(error is CancellationError) { self.error = language.message(error) }
+                    if error is CancellationError { status = language.text("cancelled") }
+                    completion(.failure(error))
+                    return
                 }
-                let file = try await withTaskCancellationHandler(operation: { try await work.value }, onCancel: { work.cancel(); engineRunner.cancel() })
-                openedCopies.append(root); status = language.text("Temporary copy ready. Changes are not saved to the archive."); completion(.success(file))
-            } catch {
-                try? FileManager.default.removeItem(at: root); self.error = language.message(error); completion(.failure(error))
             }
+            completion(.failure(CancellationError()))
         }
+    }
+    private func requestExportPassword(_ item: ArchiveEntry, retry: Bool) -> String? {
+        let alert = NSAlert()
+        alert.messageText = language.text(retry ? "Incorrect password. Try again." : "Password required")
+        let explanation = language.text("Enter the password to preview “{0}”. It stays in memory for this archive only.", item.name)
+        alert.informativeText = explanation
+        alert.addButton(withTitle: language.text("Unlock and Preview"))
+        alert.addButton(withTitle: language.text("Cancel"))
+        let field = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 300, height: 24))
+        field.placeholderString = language.text("Password")
+        field.setAccessibilityLabel(language.text("Password"))
+        alert.accessoryView = field
+        alert.window.initialFirstResponder = field
+        while alert.runModal() == .alertFirstButtonReturn {
+            let value = field.stringValue
+            guard !value.isEmpty else { continue }
+            do { _ = try ArchiveCommands.passwordSwitch(value); return value }
+            catch { alert.informativeText = explanation + "\n\n" + language.message(error) }
+        }
+        return nil
     }
     func dragProvider(_ item: ArchiveEntry) -> NSItemProvider {
         let provider = NSItemProvider(); provider.suggestedName = item.name
@@ -280,14 +362,13 @@ import ArchiveCore
         guard !busy else { return }
         cancelInspection(); packageKind = nil; packageReport = nil
         session = nil; archive = url; entries = []; selection = []; password = ""; filter = ""; directory = ""; zipEncoding = .auto
-        recent.removeAll { $0 == url }; recent.insert(url, at: 0); recent = Array(recent.prefix(10))
-        UserDefaults.standard.set(recent.map(\.path), forKey: "recentArchives")
-        NSDocumentController.shared.noteNewRecentDocumentURL(url)
+        recentHistory.record(url)
         browse()
     }
     func browse() {
         guard !busy else { return }
         guard let archive else { return }
+        closePreview()
         do {
             let args = try ArchiveCommands.list(archive, password: password, using: .sevenZip, encoding: zipEncoding)
             editRefusal = "Archive must be listed successfully before editing."
