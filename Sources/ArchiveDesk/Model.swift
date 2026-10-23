@@ -11,6 +11,7 @@ import ArchiveCore
     @Published var entries: [ArchiveEntry] = [] { didSet { refreshVisible() } }
     @Published var selection: Set<String> = []
     @Published var zipEncoding: ZIPNameEncoding = .auto
+    @Published var detectedZIPEncoding: ZIPNameEncoding?
     @Published var quickLookURL: URL?
     let filePreview = PreviewSession()
     private lazy var previewWindow = FilePreviewWindowController(model: self)
@@ -361,7 +362,7 @@ import ArchiveCore
     func open(_ url: URL) {
         guard !busy else { return }
         cancelInspection(); packageKind = nil; packageReport = nil
-        session = nil; archive = url; entries = []; selection = []; password = ""; filter = ""; directory = ""; zipEncoding = .auto
+        session = nil; archive = url; entries = []; selection = []; password = ""; filter = ""; directory = ""; zipEncoding = .auto; detectedZIPEncoding = nil
         recentHistory.record(url)
         browse()
     }
@@ -370,6 +371,8 @@ import ArchiveCore
         guard let archive else { return }
         closePreview()
         do {
+            let resolved = zipEncoding.resolved(for: archive)
+            detectedZIPEncoding = zipEncoding == .auto && resolved != .auto ? resolved : nil
             let args = try ArchiveCommands.list(archive, password: password, using: .sevenZip, encoding: zipEncoding)
             editRefusal = "Archive must be listed successfully before editing."
             entries = []; selection = []; directory = ""
@@ -378,7 +381,7 @@ import ArchiveCore
                 guard Set(parsed.map(\.path)).count == parsed.count else { self.error = self.language.text("Duplicate paths prevent reliable item selection."); return }
                 self.entries = parsed
                 self.editRefusal = self.password.isEmpty ? (ArchiveEditor.refusal(archive, listing: result.stdout) ?? "") : "Encrypted archives are read-only in this version."
-                if self.zipEncoding != .auto { self.editRefusal = "Archives using a manual filename encoding are read-only." }
+                if self.zipEncoding != .auto || self.detectedZIPEncoding != nil { self.editRefusal = "Archives using a filename encoding override are read-only." }
                 let kind = PackageInspector.kind(archive: archive, entries: parsed)
                 if kind == .ipa || kind == .apk { self.editRefusal = "Application packages are read-only." }
                 self.packageKind = kind == .ipa || kind == .apk || ["ipa", "apk"].contains(archive.pathExtension.lowercased()) ? kind : nil

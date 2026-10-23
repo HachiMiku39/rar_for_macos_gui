@@ -59,6 +59,18 @@ struct FilePreviewView: View {
                 Spacer()
                 Button(language.text("Close")) { model.closePreview() }.keyboardShortcut(.cancelAction)
             }.padding(12).background(.bar)
+            if session.hasTextData {
+                HStack {
+                    Picker(language.text("Text encoding"), selection: Binding(get: { session.textEncoding }, set: { session.setTextEncoding($0) })) {
+                        ForEach(PreviewTextEncoding.allCases, id: \.self) { encoding in
+                            Text(encoding.rawValue).tag(encoding)
+                        }
+                    }.frame(maxWidth: 310)
+                    Text(language.text("Independent of ZIP filename encoding."))
+                        .font(.caption).foregroundStyle(.secondary)
+                    Spacer()
+                }.padding(.horizontal, 16).padding(.vertical, 8)
+            }
             Group {
                 switch session.phase {
                 case .preparing:
@@ -92,6 +104,10 @@ struct FilePreviewView: View {
             VStack(alignment: .leading, spacing: 8) {
                 HStack {
                     Text(text.encoding).font(.caption).foregroundStyle(.secondary)
+                    if text.inferred {
+                        Text(language.text("Detected encoding; choose another if the text looks incorrect."))
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
                     if text.truncated { Text(language.text("Showing the first 256 KiB only.")).font(.caption).foregroundStyle(.orange) }
                     Spacer()
                     Button(language.text("Copy preview text")) {

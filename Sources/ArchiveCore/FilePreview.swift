@@ -2,6 +2,61 @@ import Foundation
 import AVFoundation
 import ImageIO
 import Darwin
+import CoreFoundation
+
+/// Filename and document encodings are separate choices, even when they share a codec.
+public enum PreviewTextEncoding: String, CaseIterable, Sendable {
+    case auto = "Auto", utf8 = "UTF-8", utf16LE = "UTF-16 LE", utf16BE = "UTF-16 BE"
+    case gb18030 = "GB18030", gbk = "GBK", cp932 = "Shift-JIS / CP932", big5 = "Big5", korean = "CP949"
+    case cp437 = "CP437", cp850 = "CP850", windows1252 = "Windows-1252", cp866 = "CP866", windows1251 = "Windows-1251"
+
+    public var codePage: UInt32? {
+        switch self {
+        case .auto: return nil
+        case .utf8: return 65001
+        case .utf16LE: return 1200
+        case .utf16BE: return 1201
+        case .gb18030: return 54936
+        case .gbk: return 936
+        case .cp932: return 932
+        case .big5: return 950
+        case .korean: return 949
+        case .cp437: return 437
+        case .cp850: return 850
+        case .windows1252: return 1252
+        case .cp866: return 866
+        case .windows1251: return 1251
+        }
+    }
+    public var foundationEncoding: String.Encoding? {
+        guard let codePage else { return nil }
+        let cf = CFStringConvertWindowsCodepageToEncoding(codePage)
+        guard cf != kCFStringEncodingInvalidId else { return nil }
+        return String.Encoding(rawValue: CFStringConvertEncodingToNSStringEncoding(cf))
+    }
+    static func isReadable(_ text: String) -> Bool {
+        !text.unicodeScalars.contains { ($0.value < 32 && ![9, 10, 13].contains($0.value)) || (0x7f...0x9f).contains($0.value) || $0.value == 0xfffd }
+    }
+    static func strict(_ data: Data, as encoding: Self) -> String? {
+        guard let codec = encoding.foundationEncoding, let text = String(data: data, encoding: codec),
+              text.data(using: codec, allowLossyConversion: false) == data, isReadable(text) else { return nil }
+        return text
+    }
+    /// A bounded, lossless guess, not a guarantee. Short ambiguous input needs manual selection.
+    static func detectLegacy(_ data: Data) -> Self? {
+        guard data.count <= FilePreviewContent.textLimit, data.filter({ $0 >= 0x80 }).count >= 4,
+              !data.contains(0), !data.starts(with: [0xff, 0xfe]), !data.starts(with: [0xfe, 0xff]) else { return nil }
+        let choices: [Self] = [.gb18030, .cp932, .big5, .korean, .windows1252, .windows1251, .cp866, .cp850, .cp437]
+        var converted: NSString?, lossy: ObjCBool = false
+        let raw = NSString.stringEncoding(for: data, encodingOptions: [
+            .suggestedEncodingsKey: choices.compactMap { $0.foundationEncoding?.rawValue },
+            .useOnlySuggestedEncodingsKey: true, .allowLossyKey: false
+        ], convertedString: &converted, usedLossyConversion: &lossy)
+        guard !lossy.boolValue, let choice = choices.first(where: { $0.foundationEncoding?.rawValue == raw }),
+              strict(data, as: choice) != nil else { return nil }
+        return choice
+    }
+}
 
 /// Routing is a UI hint, never a substitute for validating the extracted file.
 public enum FilePreviewKind: String, Sendable {
@@ -29,6 +84,7 @@ public struct TextPreview: Sendable {
     public let text: String
     public let truncated: Bool
     public let encoding: String
+    public let inferred: Bool
 }
 
 public enum FilePreviewContent {
@@ -51,20 +107,26 @@ public enum FilePreviewContent {
         return try handle.read(upToCount: limit) ?? Data()
     }
 
-    public static func text(_ url: URL) throws -> TextPreview {
+    public static func text(_ url: URL, encoding: PreviewTextEncoding = .auto) throws -> TextPreview {
         let input = try readPrefix(url, limit: textLimit + 4)
-        return try decodeText(input)
+        return try decodeText(input, encoding: encoding)
     }
 
-    public static func decodeText(_ input: Data) throws -> TextPreview {
+    public static func decodeText(_ input: Data, encoding choice: PreviewTextEncoding = .auto) throws -> TextPreview {
         let truncated = input.count > textLimit
         let bytes = Data(input.prefix(textLimit))
-        let little = bytes.starts(with: [0xff, 0xfe])
-        let big = bytes.starts(with: [0xfe, 0xff])
+        // Never reinterpret known binary containers as a permissive legacy code page.
+        let signatures: [[UInt8]] = [[0x50,0x4b,3,4], [0x4d,0x5a], [0x7f,0x45,0x4c,0x46], [0x1f,0x8b], Array("bplist00".utf8), [0x89,0x50,0x4e,0x47], [0xff,0xd8,0xff]]
+        guard !signatures.contains(where: { bytes.starts(with: $0) }) else { throw ArchiveError.invalid("Text could not be decoded with this encoding. Choose another text encoding. Binary data is not rendered.") }
+        let hasBOM = bytes.starts(with: [0xff, 0xfe]) || bytes.starts(with: [0xfe, 0xff])
+        let hasUTF8BOM = bytes.starts(with: [0xef, 0xbb, 0xbf])
+        let little = bytes.starts(with: [0xff, 0xfe]) || (!hasBOM && !hasUTF8BOM && choice == .utf16LE)
+        let big = bytes.starts(with: [0xfe, 0xff]) || (!hasBOM && !hasUTF8BOM && choice == .utf16BE)
         var decoded: String?
-        let encoding = little ? "UTF-16 LE" : big ? "UTF-16 BE" : "UTF-8"
+        var encoding = little ? "UTF-16 LE" : big ? "UTF-16 BE" : "UTF-8"
+        var inferred = false
         if little || big {
-            let payload = Array(bytes.dropFirst(2))
+            let payload = Array(hasBOM ? bytes.dropFirst(2) : bytes[...])
             if payload.count % 2 == 0 || truncated {
                 var units = stride(from: 0, to: payload.count - payload.count % 2, by: 2).map { index in
                     little ? UInt16(payload[index]) | UInt16(payload[index + 1]) << 8 : UInt16(payload[index]) << 8 | UInt16(payload[index + 1])
@@ -74,16 +136,29 @@ public enum FilePreviewContent {
                 if Array(string.utf16) == units { decoded = string }
             }
         } else {
-            let payload = Data(bytes.starts(with: [0xef, 0xbb, 0xbf]) ? bytes.dropFirst(3) : bytes[...])
+            let utf8BOM = bytes.starts(with: [0xef, 0xbb, 0xbf])
+            let payload = Data(utf8BOM ? bytes.dropFirst(3) : bytes[...])
             // A bounded prefix may split the final UTF-8 scalar, but never repair invalid bytes inside it.
-            for trim in 0...(truncated ? min(3, payload.count) : 0) {
-                if let text = String(data: payload.dropLast(trim), encoding: .utf8) { decoded = text; break }
+            if choice == .auto || choice == .utf8 || utf8BOM {
+                for trim in 0...(truncated ? min(3, payload.count) : 0) {
+                    if let text = String(data: payload.dropLast(trim), encoding: .utf8) { decoded = text; break }
+                }
+            }
+            if decoded == nil && !utf8BOM && choice != .utf8 {
+                // At most three bytes are held back when the prefix splits a multibyte character.
+                for trim in 0...(truncated ? min(3, payload.count) : 0) {
+                    let sample = Data(payload.dropLast(trim))
+                    let selected = choice == .auto ? PreviewTextEncoding.detectLegacy(sample) : choice
+                    if let selected, let text = PreviewTextEncoding.strict(sample, as: selected) {
+                        decoded = text; encoding = selected.rawValue; inferred = choice == .auto; break
+                    }
+                }
             }
         }
-        guard let text = decoded, !text.unicodeScalars.contains(where: { $0.value < 32 && ![9, 10, 13].contains($0.value) }) else {
-            throw ArchiveError.invalid("Text preview requires UTF-8 or BOM-marked UTF-16. Binary data is not rendered.")
+        guard let text = decoded, PreviewTextEncoding.isReadable(text) else {
+            throw ArchiveError.invalid("Text could not be decoded with this encoding. Choose another text encoding. Binary data is not rendered.")
         }
-        return TextPreview(text: text, truncated: truncated, encoding: encoding)
+        return TextPreview(text: text, truncated: truncated, encoding: encoding, inferred: inferred)
     }
 
     public static func image(_ url: URL, maximumEdge: Int = 2560) throws -> CGImage {

@@ -15,6 +15,8 @@ import CoreGraphics
     @Published public private(set) var player: AVPlayer?
     @Published public private(set) var message = ""
     @Published public private(set) var preparingFile = false
+    @Published public private(set) var textEncoding: PreviewTextEncoding = .auto
+    @Published public private(set) var hasTextData = false
     @Published public private(set) var position: Double = 0
     @Published public private(set) var isPlaying = false
     @Published public var volume: Double = 1 { didSet { player?.volume = Float(max(0, min(1, volume))) } }
@@ -27,6 +29,9 @@ import CoreGraphics
     private var playbackObservation: NSKeyValueObservation?
     private var timeObserver: Any?
     private var temporaryRoot: URL?
+    private var textData: Data?
+    private var textDecodeTask: Task<Void, Never>?
+    private var textDecodeID = UUID()
 
     public init() {}
     @discardableResult public func begin(name: String, kind: FilePreviewKind) -> UUID {
@@ -48,12 +53,12 @@ import CoreGraphics
         }
         task = Task { [weak self] in
             do {
-                let content = Task.detached(priority: .userInitiated) { () throws -> (CGImage?, TextPreview?, AVURLAsset?) in
+                let content = Task.detached(priority: .userInitiated) { () throws -> (CGImage?, Data?, AVURLAsset?) in
                     try PreviewSafety.validate(url, inside: ownedRoot)
                     try Task.checkCancellation()
                     switch kind {
                     case .image: return (try FilePreviewContent.image(url), nil, nil)
-                    case .text: return (nil, try FilePreviewContent.text(url), nil)
+                    case .text: return (nil, try FilePreviewContent.readPrefix(url, limit: FilePreviewContent.textLimit + 4), nil)
                     case .audio, .video: return (nil, nil, try NativeMediaPreview.asset(url))
                     case nil: throw CancellationError()
                     }
@@ -61,7 +66,12 @@ import CoreGraphics
                 let result = try await withTaskCancellationHandler(operation: { try await content.value }, onCancel: { content.cancel() })
                 try Task.checkCancellation()
                 guard let self, self.requestID == id else { return }
-                self.image = result.0; self.text = result.1
+                self.image = result.0
+                if let data = result.1 {
+                    self.textData = data; self.hasTextData = true
+                    self.decodeCurrentText()
+                    return
+                }
                 if let asset = result.2 {
                     self.asset = asset
                     let details = try await withTaskCancellationHandler(operation: { try await NativeMediaPreview.inspect(asset) }, onCancel: { asset.cancelLoading() })
@@ -111,6 +121,36 @@ import CoreGraphics
         }
     }
 
+    public func setTextEncoding(_ encoding: PreviewTextEncoding) {
+        guard hasTextData, requestID != nil, textEncoding != encoding else { return }
+        textEncoding = encoding
+        decodeCurrentText()
+    }
+
+    /// Re-decode only the bounded, already decrypted and CRC-verified text prefix.
+    /// A failed code-page choice keeps this prefix until close so the picker can recover.
+    private func decodeCurrentText() {
+        guard let data = textData, let request = requestID else { return }
+        timeoutTask?.cancel(); timeoutTask = nil
+        textDecodeTask?.cancel(); textDecodeID = UUID()
+        let generation = textDecodeID, encoding = textEncoding
+        text = nil; message = ""; phase = .preparing
+        textDecodeTask = Task { [weak self] in
+            do {
+                let worker = Task.detached(priority: .userInitiated) { try FilePreviewContent.decodeText(data, encoding: encoding) }
+                let result = try await withTaskCancellationHandler(operation: { try await worker.value }, onCancel: { worker.cancel() })
+                try Task.checkCancellation()
+                guard let self, self.requestID == request, self.textDecodeID == generation else { return }
+                self.text = result; self.phase = .ready
+            } catch is CancellationError { }
+            catch {
+                guard let self, self.requestID == request, self.textDecodeID == generation else { return }
+                self.message = (error as? ArchiveError)?.errorDescription ?? "Text could not be decoded with this encoding. Choose another text encoding. Binary data is not rendered."
+                self.phase = .failed
+            }
+        }
+    }
+
     public func fail(_ message: String, requestID id: UUID) {
         guard requestID == id else { return }
         task?.cancel(); task = nil
@@ -141,6 +181,8 @@ import CoreGraphics
     }
 
     private func releaseResources() {
+        textDecodeTask?.cancel(); textDecodeTask = nil; textDecodeID = UUID()
+        textData = nil; hasTextData = false; textEncoding = .auto
         timeoutTask?.cancel(); timeoutTask = nil
         statusObservation?.invalidate(); statusObservation = nil
         playbackObservation?.invalidate(); playbackObservation = nil

@@ -60,6 +60,10 @@ struct ContentView: View {
                         Picker(language.text("ZIP filename encoding"), selection: $model.zipEncoding) {
                             ForEach(ZIPNameEncoding.allCases, id: \.self) { Text($0.rawValue).tag($0) }
                         }.frame(maxWidth: 235).onChange(of: model.zipEncoding) { _, _ in model.browse() }
+                        if let detected = model.detectedZIPEncoding {
+                            Text("Auto → " + detected.rawValue).font(.caption).foregroundStyle(.secondary)
+                                .help(language.text("Detected encoding; choose another if the text looks incorrect."))
+                        }
                     }
                     Spacer()
                     Toggle(language.text("Task Log"), isOn: $showLog).toggleStyle(.checkbox)

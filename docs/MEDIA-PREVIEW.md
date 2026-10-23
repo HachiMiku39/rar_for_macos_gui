@@ -34,9 +34,10 @@ their own lifetime and are removed on close, switch, failure or archive reload.
 - Image: ImageIO first-frame thumbnail (up to 2560 px), EXIF orientation applied.
   JPEG/PNG/WebP/HEIF and other ImageIO-readable formats depend on the OS. Animation,
   pixel-perfect full-resolution viewing and editing are not included.
-- Text: strict UTF-8 or BOM-marked UTF-16 LE/BE. A bounded prefix is rendered as
-  plain text with selection/copy. XML, HTML, SVG and source are not executed or fetched.
-  Binary plist/legacy text code pages are not automatically converted.
+- Text: UTF-8, UTF-16 and bounded legacy-codepage decoding with an independent
+  Auto/manual picker (build 19). Guesses are identified and can be overridden.
+  A bounded prefix is rendered as plain text with selection/copy. XML, HTML, SVG
+  and source are not executed or fetched. Binary signatures/control data are refused.
 - The desktop app continues to support macOS 14+ and arm64 + x86_64. Runtime tests
   on an Apple Silicon development machine do not establish Intel/macOS 14 codec parity.
 
@@ -57,6 +58,9 @@ their own lifetime and are removed on close, switch, failure or archive reload.
    video dimensions up to 32 million pixels, at most eight AV tracks. Text reads at
    most 256 KiB + four lookahead bytes. Covers up to 8 MiB and 1024 px output; at most
    64 metadata items and 2048 UTF-8 bytes per displayed string (including combining marks).
+   From build 19, a text-codepage decoding failure retains only the bounded prefix
+   and its verified staging directory until close/switch, allowing a manual retry;
+   it does not bypass extraction, password or CRC validation.
 5. The 3-second preferred playback buffer and 1440p preferred playback resolution
    are AVPlayer hints, **not hard RSS ceilings**. AVFoundation owns media/metadata
    allocations before app-level checks; a strict per-decoder sandbox memory cap is

@@ -4,12 +4,81 @@ import Darwin
 
 public enum ZIPNameEncoding: String, CaseIterable {
     case auto = "Auto", utf8 = "UTF-8", cp437 = "CP437", gbk = "GBK", gb18030 = "GB18030", cp932 = "Shift-JIS / CP932", big5 = "Big5", korean = "EUC-KR / CP949"
+    case cp850 = "CP850", windows1252 = "Windows-1252", cp866 = "CP866", windows1251 = "Windows-1251"
     public var codePage: Int? {
-        switch self { case .auto: return nil; case .utf8: return 65001; case .cp437: return 437; case .gbk: return 936; case .gb18030: return 54936; case .cp932: return 932; case .big5: return 950; case .korean: return 949 }
+        switch self { case .auto: return nil; case .utf8: return 65001; case .cp437: return 437; case .gbk: return 936; case .gb18030: return 54936; case .cp932: return 932; case .big5: return 950; case .korean: return 949; case .cp850: return 850; case .windows1252: return 1252; case .cp866: return 866; case .windows1251: return 1251 }
     }
     public func switches(for url: URL) -> [String] {
-        guard ["zip", "zipx", "z01"].contains(url.pathExtension.lowercased()), let codePage else { return [] }
+        guard ["zip", "zipx", "z01", "jar", "epub", "ipa", "apk"].contains(url.pathExtension.lowercased()),
+              let codePage = resolved(for: url).codePage else { return [] }
         return ["-mcp=\(codePage)"]
+    }
+    public func resolved(for url: URL) -> Self {
+        guard self == .auto else { return self }
+        return ZIPFilenameProbe.detect(url) ?? .auto
+    }
+}
+
+/// Metadata-only probe. Complex, split, ZIP64 or oversized indexes stay on the original
+/// backend and can use an explicit override. Never read the payload or scan an entire ISO.
+enum ZIPFilenameProbe {
+    static func detect(_ url: URL) -> ZIPNameEncoding? {
+        guard url.isFileURL, ["zip", "zipx", "jar", "epub", "ipa", "apk"].contains(url.pathExtension.lowercased()) else { return nil }
+        let fd = Darwin.open(url.path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
+        guard fd >= 0 else { return nil }
+        let file = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+        defer { try? file.close() }
+        var info = stat()
+        guard fstat(fd, &info) == 0, info.st_mode & S_IFMT == S_IFREG, info.st_size >= 22 else { return nil }
+        do {
+            let length = UInt64(info.st_size), tailSize = min(Int(length), 65_557)
+            try file.seek(toOffset: length - UInt64(tailSize))
+            let tail = Array(try file.read(upToCount: tailSize) ?? Data())
+            guard tail.count == tailSize else { return nil }
+            func u16(_ bytes: [UInt8], _ i: Int) -> Int { Int(bytes[i]) | Int(bytes[i+1]) << 8 }
+            func u32(_ bytes: [UInt8], _ i: Int) -> Int { u16(bytes, i) | u16(bytes, i+2) << 16 }
+            guard let end = stride(from: tail.count - 22, through: 0, by: -1).first(where: {
+                tail[$0..<$0+4].elementsEqual([0x50,0x4b,5,6]) && $0 + 22 + u16(tail, $0+20) == tail.count
+            }), u16(tail, end+4) == 0, u16(tail, end+6) == 0,
+                  u16(tail, end+8) == u16(tail, end+10) else { return nil }
+            let count = u16(tail, end+10), size = u32(tail, end+12), offset = u32(tail, end+16)
+            guard count > 0, count <= 16_384, size <= 1_048_576, offset != 0xffff_ffff,
+                  UInt64(offset) + UInt64(size) <= length - UInt64(tail.count - end) else { return nil }
+            try file.seek(toOffset: UInt64(offset))
+            let central = Array(try file.read(upToCount: size) ?? Data())
+            guard central.count == size else { return nil }
+            var cursor = 0, sample = Data(), hasUnicodeExtra = false
+            for _ in 0..<count {
+                guard cursor + 46 <= central.count, central[cursor..<cursor+4].elementsEqual([0x50,0x4b,1,2]),
+                      u16(central, cursor+34) == 0 else { return nil }
+                let flags = u16(central, cursor+8), n = u16(central, cursor+28)
+                let x = u16(central, cursor+30), comment = u16(central, cursor+32)
+                let next = cursor + 46 + n + x + comment
+                guard n > 0, next <= central.count else { return nil }
+                let name = Data(central[cursor+46..<cursor+46+n])
+                var field = cursor + 46 + n
+                let fieldEnd = field + x
+                while field + 4 <= fieldEnd {
+                    let tag = u16(central, field), fieldSize = u16(central, field+2)
+                    guard field + 4 + fieldSize <= fieldEnd else { return nil }
+                    if tag == 0x7075 { hasUnicodeExtra = true }
+                    field += 4 + fieldSize
+                }
+                guard field == fieldEnd else { return nil }
+                if flags & 0x800 == 0, name.contains(where: { $0 >= 0x80 }) {
+                    guard sample.count + n + 1 <= 65_536 else { return nil }
+                    sample.append(name); sample.append(10)
+                }
+                cursor = next
+            }
+            // Keep Unicode-extra archives on 7-Zip: the system libarchive can expose
+            // different names during header-only listing and payload extraction.
+            guard cursor == central.count, !sample.isEmpty, !hasUnicodeExtra else { return nil }
+            if String(data: sample, encoding: .utf8) != nil { return .utf8 }
+            if let guessed = PreviewTextEncoding.detectLegacy(sample), let page = guessed.codePage,
+               let match = ZIPNameEncoding.allCases.first(where: { $0.codePage == Int(page) }) { return match }
+            return .cp437
+        } catch { return nil }
     }
 }
 

@@ -13,6 +13,10 @@
 
 static int fail(struct archive *a, const char *message) {
     const char *detail = a ? archive_error_string(a) : NULL;
+    if (detail && (strstr(detail, "Incorrect passphrase") || strstr(detail, "incorrect passphrase") || strstr(detail, "Incorrect password"))) {
+        fprintf(stderr, "ERROR: Wrong password\n");
+        return 2;
+    }
     fprintf(stderr, "%s%s%s\n", message, detail ? ": " : "", detail ? detail : "");
     return 2;
 }
@@ -24,6 +28,10 @@ static const char *charset(const char *page) {
     if (!strcmp(page, "932")) return "CP932";
     if (!strcmp(page, "950")) return "BIG5";
     if (!strcmp(page, "949")) return "CP949";
+    if (!strcmp(page, "850")) return "CP850";
+    if (!strcmp(page, "1252")) return "WINDOWS-1252";
+    if (!strcmp(page, "866")) return "CP866";
+    if (!strcmp(page, "1251")) return "WINDOWS-1251";
     return NULL;
 }
 static const char *passphrase(struct archive *a, void *context) {

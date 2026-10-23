@@ -2,7 +2,14 @@
 
 macOS 原生归档管理器，支持 macOS 14+、Apple Silicon 和 Intel。使用 SwiftUI 界面和独立命令行引擎，不自行实现 RAR 编解码。
 
-## 1.1.0-beta.3（build 18）
+## 1.1.0-beta.4（build 19）
+
+- 普通 ZIP 的 Auto 文件名模式现在会在有界中央目录样本上识别旧编码，显示 `Auto → GB18030` 等结果；浏览、单项预览和解压使用相同选择。Unicode 扩展字段保留原引擎处理；ZIP64、分卷、过大索引和混合编码不承诺自动识别，仍可手动选择。
+- 文本预览新增独立“正文编码”：Auto、UTF-8、UTF-16 LE/BE、GBK、GB18030、CP932、Big5、CP949、CP437、CP850、Windows-1252、CP866、Windows-1251。自动识别为启发式，不保证短文本或混合编码正确；可在失败页直接改编码重试，无需重新解压。
+- ZIP 手动文件名选项增加 CP850、Windows-1252、CP866、Windows-1251。使用文件名编码转换时仍为只读，不编辑原包。
+- iOS 同类问题已在独立仓库修复为 0.3.3 Beta 2（build 10），并通过单台 iPhone / iOS 27.2 模拟器验证；不是 Mac 后端移植。详见 [编码行为与验证](docs/ENCODING.md)。
+
+## 已发布的 1.1.0-beta.3（build 18）
 
 - 修复加密归档内文件的预览密码流程：文件名可见不代表内容已解密；双击或按空格预览时请求密码，密码错误可重试，取消不会留下可预览的明文。
 - “最近打开”仅保留在当前运行的内存中，不再写入设置或主动注册系统最近文稿；退出 App（⌘Q）后自动清除，下次启动不恢复，并清理旧版保存的记录。关闭窗口不等于退出 App。
@@ -15,7 +22,7 @@ macOS 原生归档管理器，支持 macOS 14+、Apple Silicon 和 Intel。使�
 - 视频／音频：播放、暂停、拖动时间轴、音量；视频支持原生全屏控件，音频支持前后跳转 15 秒。
 - 音乐信息：标题、艺术家、专辑等系统能识别的标签，以及内嵌 JPEG／PNG 封面。
 - 图片：按窗口缩略显示、处理图片方向；动图只显示第一帧。
-- 文本：只读 UTF-8 / 带 BOM 的 UTF-16，最多预览前 256 KiB，支持复制；HTML／SVG／源码仅显示文字，不执行。
+- 文本：只读、多编码预览，最多预览前 256 KiB，支持复制；HTML／SVG／源码仅显示文字，不执行。build 19 开始支持独立旧编码选择。
 - 关闭预览即停止播放器并删除其临时副本；预览失败不影响压缩包浏览。原来的 **Quick Look**、**打开选中项**（系统默认应用）和拖出文件仍保留。
 
 macOS 使用 **AVFoundation / AVKit / ImageIO**，不是 iOS 的 FFmpeg 解码器移植：MKV、WebM、AV1 等是否可播放取决于系统与编码，不能保证与 iOS 完全一致。解压能力不受此限制；不支持的媒体会提示解压后使用其他播放器。此开发版没有新增第三方媒体二进制依赖。
@@ -24,7 +31,7 @@ macOS 使用 **AVFoundation / AVKit / ImageIO**，不是 iOS 的 FFmpeg 解码�
 
 ## 安装
 
-测试新版请下载 `ArchiveDesk-1.1.0-beta.3-universal.dmg`，退出旧 App 后把 ArchiveDesk 拖到 Applications 替换；也提供应用 ZIP、源码 ZIP 和 SHA-256 校验文件。需要旧正式版可继续下载 1.0.0。全部版本见 [Releases](https://github.com/HachiMiku39/rar_for_macos_gui/releases)。
+测试新版请在 [1.1.0-beta.4 发布页](https://github.com/HachiMiku39/rar_for_macos_gui/releases/tag/v1.1.0-beta.4) 下载 `ArchiveDesk-1.1.0-beta.4-universal.dmg`，退出旧 App 后把 ArchiveDesk 拖到 Applications 替换；也提供应用 ZIP、源码 ZIP 和 SHA-256 校验文件。需要旧正式版可继续下载 1.0.0。全部版本见 [Releases](https://github.com/HachiMiku39/rar_for_macos_gui/releases)。
 
 **1.0 正式版：** 采用圆角底板、透明留白的新 Dock 图标。CPU 主指标显示本软件占整机逻辑核心的比例（0–100%），另列活动监视器口径的进程 CPU（单核心满载为 100%，多核可超过 100%）。两项均统计 ArchiveDesk + 当前引擎，不包括其他应用。更新时先退出旧版本，再替换 Applications 中的应用。
 
