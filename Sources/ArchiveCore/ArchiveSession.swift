@@ -159,7 +159,7 @@ public enum ArchiveEditor {
 }
 
 public enum ExtractionPolicy: String, CaseIterable { case ask = "Ask before replacing", skip = "Skip existing files", rename = "Rename incoming files", replace = "Replace existing files", update = "Update older files" }
-public enum ConflictChoice { case replace, skip, rename, cancel }
+public enum ConflictChoice { case replace, replaceAll, skip, rename, cancel }
 public struct ExtractionReport {
     public var written = 0; public var skipped = 0; public var renamed = 0; public var backups = 0
     public var processedBytes: UInt64 = 0
@@ -205,6 +205,7 @@ public enum ExtractionMerger {
         }
         notify(true)
         var directories: [(URL, URL)] = []
+        var replaceAll = false
         for file in files {
             try Task.checkCancellation()
             let base = stage.resolvingSymlinksInPath().path, full = file.resolvingSymlinksInPath().path
@@ -232,7 +233,7 @@ public enum ExtractionMerger {
                 guard old.isRegularFile == true else { throw ArchiveError.invalid("A file conflicts with an existing directory or special file.") }
                 let choice: ConflictChoice
                 switch policy {
-                case .ask: choice = await conflict(relative)
+                case .ask: choice = replaceAll ? .replace : await conflict(relative)
                 case .skip: choice = .skip
                 case .rename: choice = .rename
                 case .replace: choice = .replace
@@ -246,6 +247,7 @@ public enum ExtractionMerger {
                     var n = 2
                     repeat { target = target.deletingLastPathComponent().appendingPathComponent((file.lastPathComponent as NSString).deletingPathExtension + " (\(n))" + (file.pathExtension.isEmpty ? "" : "." + file.pathExtension)); n += 1 } while fm.fileExists(atPath: target.path) || (try? target.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) == true
                     exists = false; report.renamed += 1
+                case .replaceAll: replaceAll = true
                 case .replace: break
                 }
             }

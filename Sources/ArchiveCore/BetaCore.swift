@@ -195,7 +195,7 @@ public enum BatchExtractor {
                                encoding: ZIPNameEncoding, policy: ExtractionPolicy,
                                conflict: @escaping (String) async -> ConflictChoice,
                                update: @escaping (String, String) -> Void,
-                               progress: @escaping (ExtractionReport) -> Void = { _ in }) async throws -> URL {
+                               progress: @escaping (ExtractionReport) -> Void = { _ in }, useStaging: Bool = true) async throws -> URL {
         let fm = FileManager.default
         try ExtractionMerger.checkDirectory(parent)
         let destination = parent.appendingPathComponent(BatchArchives.folderName(source), isDirectory: true)
@@ -203,20 +203,23 @@ public enum BatchExtractor {
         guard !source.standardizedFileURL.path.hasPrefix(destination.standardizedFileURL.path + "/") else { throw ArchiveError.invalid("Source archive is inside the extraction destination.") }
         if !fm.fileExists(atPath: destination.path) { try fm.createDirectory(at: destination, withIntermediateDirectories: false) }
         try ExtractionMerger.checkDirectory(destination)
-        let stage = fm.temporaryDirectory.appendingPathComponent("ArchiveDesk-batch-" + UUID().uuidString)
-        try fm.createDirectory(at: stage, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
-        defer { try? fm.removeItem(at: stage) }
+        let stage = useStaging ? try ExtractionStaging.create(in: parent) : destination
+        defer { if useStaging { try? fm.removeItem(at: stage) } }
         let session = try await ArchiveSession.prepare(source, sevenZip: engine, runner: runner, update: update)
         let archive = session.workingURL
         let listed = try await runner.run(executable: engine, arguments: ArchiveCommands.list(archive, password: password, using: .sevenZip, encoding: encoding), password: password, update: update)
         if listed.cancelled { throw CancellationError() }
         guard listed.status == 0 else { throw ArchiveError.invalid("Reading the archive failed. Check the task log.") }
         let rows = listed.archiveEntries(backend: .sevenZip)
-        if [.ipa, .apk].contains(PackageInspector.kind(archive: source, entries: rows)) {
+        if useStaging && [.ipa, .apk].contains(PackageInspector.kind(archive: source, entries: rows)) {
             _ = try await PackageExporter.extract(archive: source, destination: stage, selected: [], sevenZip: engine, password: password, runner: runner, update: update)
         } else {
             let size = UInt64(max(0, (try? source.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0))
             let bytes = try ExtractionSafety.validate(rows, compressedBytes: size)
+            if !useStaging {
+                let report = try await DirectExtractor.extract(archive, entries: rows, destination: destination, selected: [], engine: engine, password: password, encoding: encoding, runner: runner, update: update, conflict: conflict)
+                progress(report); return destination
+            }
             try DiskSpace.requireStaging(bytes, stage: stage, destination: destination)
             let result = try await runner.run(executable: engine, arguments: ArchiveCommands.extract(archive, destination: stage, selected: [], password: password, using: .sevenZip, encoding: encoding), password: password, diskGuard: stage, update: update)
             if result.cancelled { throw CancellationError() }

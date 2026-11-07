@@ -10,6 +10,7 @@
 #include <locale.h>
 #include <limits.h>
 #include <sys/stat.h>
+#include <errno.h>
 
 static int fail(struct archive *a, const char *message) {
     const char *detail = a ? archive_error_string(a) : NULL;
@@ -114,6 +115,17 @@ int main(int argc, char **argv) {
         if (toStdout && (directory || strcmp(path, argv[index]) || exported != 0)) return fail(NULL, "ZIP stream export requires one exact regular file");
         ++exported;
         if (writer) {
+            // Match -aos for direct extraction too. libarchive's NO_OVERWRITE
+            // alone may reject subsequent data writes for an existing file.
+            struct stat existing;
+            if (lstat(path, &existing) == 0) {
+                if (!((directory && S_ISDIR(existing.st_mode)) ||
+                      (!directory && S_ISREG(existing.st_mode) && existing.st_nlink == 1)))
+                    return fail(NULL, "ZIP output conflicts with a link or different entry type");
+                if (archive_read_data_skip(a) != ARCHIVE_OK) return fail(a, "Cannot skip existing ZIP entry");
+                continue;
+            }
+            if (errno != ENOENT) return fail(NULL, "Cannot inspect existing ZIP output");
             archive_entry_set_pathname(entry, path);
             archive_entry_set_perm(entry, archive_entry_perm(entry) & 0777);
             if (archive_write_header(writer, entry) != ARCHIVE_OK) return fail(writer, "Cannot create ZIP output entry");

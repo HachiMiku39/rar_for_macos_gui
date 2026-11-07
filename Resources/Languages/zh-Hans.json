@@ -4,6 +4,11 @@
   "name": "简体中文",
   "locale": "zh-Hans",
   "strings": {
+    "Use extraction staging": "使用解压暂存区",
+    "Staging uses the destination disk. Files are verified before publication. Package export requires staging.": "暂存区使用目标磁盘，文件校验后再发布。IPA/APK 导出必须使用暂存区。",
+    "Direct mode skips existing files. Failed or cancelled tasks may leave incomplete files.": "直接解压跳过已有文件，不覆盖。失败或取消后可能留下不完整文件。",
+    "Direct extraction failed. Incomplete files may remain in the destination. Check the task log.": "直接解压失败，目标目录可能留有不完整文件，请查看任务日志。",
+    "Package export requires staging.": "IPA/APK 导出需要使用暂存区。",
     "Password": "密码",
     "Password required": "需要密码",
     "Incorrect password. Try again.": "密码不正确，请重试。",
@@ -448,7 +453,19 @@
     "Hide progress": "隐藏进度窗口",
     "Hiding this window does not cancel the task.": "隐藏窗口不会取消任务。",
     "Final task report · resource values are the last sample.": "任务最终结果 · 资源数值为最后一次采样。",
-    "The engine did not report a final percentage.": "引擎未报告最终百分比。"
+    "The engine did not report a final percentage.": "引擎未报告最终百分比。",
+    "Do not replace": "不覆盖",
+    "Replace this file": "覆盖此文件",
+    "Replace all": "全部覆盖",
+    "Create a new subfolder (random name)": "新建随机命名的子文件夹",
+    "Extraction settings": "解压设置",
+    "Both options are off by default. Direct extraction asks before replacing files; replaced originals are kept as backups.": "两项默认关闭。直接解压遇到同名文件时询问，覆盖前会保留原文件备份。",
+    "Direct mode asks before replacing existing files and keeps originals as backups. Failed or cancelled tasks may leave incomplete files.": "直接解压遇到同名文件时询问，并保留原文件备份。失败或取消可能留下不完整文件。",
+    "Rename incoming files requires extraction staging.": "解压时重命名文件需要开启暂存。",
+    "The destination changed while awaiting a conflict decision.": "等待同名文件处理决定时，目标文件发生了变化。",
+    "The source archive cannot be replaced during direct extraction.": "直接解压时不能覆盖源压缩包。",
+    "No matching archive entries.": "没有匹配的压缩包条目。",
+    "Staging uses the destination disk. Files are verified before publication.": "暂存位于目标磁盘，文件解码校验完成后再发布到目标目录。"
   },
   "sourceLanguage": "en"
 }

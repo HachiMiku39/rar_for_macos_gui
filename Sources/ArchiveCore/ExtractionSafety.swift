@@ -1,6 +1,92 @@
 import Foundation
 import Darwin
 
+/// Stage on the user-selected destination volume, never on the startup disk by default.
+/// A private sibling keeps decoded files invisible until validation and merge finish.
+public enum ExtractionStaging {
+    public static func create(in parent: URL) throws -> URL {
+        try ExtractionMerger.checkDirectory(parent)
+        let stage = parent.appendingPathComponent(".ArchiveDesk-extract-" + UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: stage, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        return stage
+    }
+}
+
+/// Explicit opt-out of staging. Conflicts are decided before any output changes.
+/// Replaced originals are renamed to backups on the destination volume.
+/// Failed decodes deliberately retain their outputs and report that they may be incomplete.
+public enum DirectExtractor {
+    public static func extract(_ archive: URL, entries: [ArchiveEntry], destination: URL, selected: [String], engine: String, password: String, encoding: ZIPNameEncoding, runner: CLIRunner, update: @escaping (String, String) -> Void, conflict: (String) async -> ConflictChoice = { _ in .skip }) async throws -> ExtractionReport {
+        _ = try ExtractionSafety.validate(entries)
+        try ExtractionMerger.checkDirectory(destination)
+        let rows = selected.isEmpty ? entries : entries.filter { row in selected.contains { row.path == $0 || row.path.hasPrefix($0.trimmingCharacters(in: CharacterSet(charactersIn: "/")) + "/") } }
+        guard !rows.isEmpty else { throw ArchiveError.invalid("No matching archive entries.") }
+        let bytes = try ExtractionSafety.validate(rows)
+        try DiskSpace.require(bytes, at: destination)
+        let fm = FileManager.default
+        var skipped = Set<String>()
+        var replacements: [(URL, stat)] = []
+        var replaceAll = false
+        for row in rows {
+            let target = destination.appendingPathComponent(row.path)
+            guard target.standardizedFileURL != archive.standardizedFileURL else { throw ArchiveError.invalid("The source archive cannot be replaced during direct extraction.") }
+            var parent = target.deletingLastPathComponent()
+            while parent.path.count >= destination.path.count {
+                var info = stat()
+                if lstat(parent.path, &info) == 0 { try ExtractionMerger.checkDirectory(parent); break }
+                guard errno == ENOENT else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+                parent.deleteLastPathComponent()
+            }
+            if let attrs = try? fm.attributesOfItem(atPath: target.path) {
+                let type = attrs[.type] as? FileAttributeType
+                guard type == (row.isDirectory ? .typeDirectory : .typeRegular), row.isDirectory || (attrs[.referenceCount] as? NSNumber)?.intValue == 1 else { throw ArchiveError.invalid("Links and special files cannot be exported.") }
+                if !row.isDirectory {
+                    let choice = replaceAll ? ConflictChoice.replace : await conflict(row.path)
+                    try Task.checkCancellation()
+                    switch choice {
+                    case .skip: skipped.insert(row.path)
+                    case .cancel: throw CancellationError()
+                    case .rename: throw ArchiveError.invalid("Rename incoming files requires extraction staging.")
+                    case .replace, .replaceAll:
+                        if case .replaceAll = choice { replaceAll = true }
+                        var original = stat()
+                        guard lstat(target.path, &original) == 0, (original.st_mode & S_IFMT) == S_IFREG, original.st_nlink == 1 else { throw ArchiveError.invalid("Links and special files cannot be exported.") }
+                        replacements.append((target, original))
+                    }
+                }
+            }
+        }
+        try Task.checkCancellation()
+        // Do not unlink originals: same-volume backups cost no second data copy.
+        // If decoding fails they remain available beside any incomplete output.
+        for (target, original) in replacements {
+            try Task.checkCancellation()
+            try ExtractionMerger.checkDirectory(target.deletingLastPathComponent())
+            var current = stat()
+            guard lstat(target.path, &current) == 0, current.st_dev == original.st_dev, current.st_ino == original.st_ino,
+                  current.st_nlink == 1, (current.st_mode & S_IFMT) == S_IFREG,
+                  current.st_size == original.st_size, current.st_mtimespec.tv_sec == original.st_mtimespec.tv_sec,
+                  current.st_mtimespec.tv_nsec == original.st_mtimespec.tv_nsec else { throw ArchiveError.invalid("The destination changed while awaiting a conflict decision.") }
+            let backup = target.deletingLastPathComponent().appendingPathComponent("ArchiveDesk-backup-" + UUID().uuidString)
+            guard renamex_np(target.path, backup.path, UInt32(RENAME_EXCL)) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        }
+        let result = try await runner.run(executable: engine, arguments: ArchiveCommands.extract(archive, destination: destination, selected: selected, password: password, using: .sevenZip, encoding: encoding), password: password, diskGuard: destination, update: update)
+        if result.cancelled || Task.isCancelled { throw CancellationError() }
+        guard result.status == 0 else { throw ArchiveError.invalid("Direct extraction failed. Incomplete files may remain in the destination. Check the task log.") }
+        var report = ExtractionReport(); report.totalBytes = bytes; report.backups = replacements.count
+        for row in rows where !row.isDirectory {
+            if skipped.contains(row.path) { report.skipped += 1; report.processedBytes += UInt64(row.size) ?? 0; continue }
+            let attrs = try fm.attributesOfItem(atPath: destination.appendingPathComponent(row.path).path)
+            guard attrs[.type] as? FileAttributeType == .typeRegular, (attrs[.referenceCount] as? NSNumber)?.intValue == 1, (attrs[.size] as? NSNumber)?.uint64Value == UInt64(row.size) else { throw ArchiveError.invalid("Direct extraction failed. Incomplete files may remain in the destination. Check the task log.") }
+            if let mode = attrs[.posixPermissions] as? NSNumber {
+                try fm.setAttributes([.posixPermissions: mode.intValue & 0o777], ofItemAtPath: destination.appendingPathComponent(row.path).path)
+            }
+            report.written += 1; report.processedBytes += UInt64(row.size) ?? 0
+        }
+        return report
+    }
+}
+
 /// General archives are not subject to mobile-inspector byte limits.
 public enum ExtractionSafety {
     public static func validate(_ entries: [ArchiveEntry], compressedBytes: UInt64 = 0) throws -> UInt64 {

@@ -80,6 +80,206 @@ final class BetaTests: XCTestCase {
             XCTAssertFalse(FileManager.default.fileExists(atPath: destination.appendingPathComponent("source/skip.tmp").path))
         }
     }
+    func testPathAttackFixturesNeverPublishOutsideDestination() async throws {
+        let base = try root(), seven = try engine(), fm = FileManager.default
+        let outside = base.appendingPathComponent("outside.txt")
+        let sentinel = Data("must remain unchanged".utf8)
+        try sentinel.write(to: outside)
+        for encoding in [ZIPNameEncoding.auto, .gb18030] {
+            for (index, name) in [outside.path, "../outside.txt", "a/../../outside.txt", "..\\outside.txt", "a\\..\\outside.txt"].enumerated() {
+                let archive = base.appendingPathComponent("attack-\(encoding.rawValue)-\(index).zip")
+                try storedZIP(Array(name.utf8)).write(to: archive)
+                let before = try FileChecksums.digest(archive, algorithm: .sha256)
+                do {
+                    _ = try await BatchExtractor.extract(archive, parent: base, engine: seven, runner: CLIRunner(), password: "", encoding: encoding, policy: .replace, conflict: { _ in .replace }, update: { _, _ in })
+                    XCTFail("Accepted attack \(name)")
+                } catch {
+                    print("PATH MATRIX: encoding=\(encoding.rawValue) path=\(name) sha256=\(before) refusal=\(error.localizedDescription)")
+                }
+                XCTAssertEqual(try Data(contentsOf: outside), sentinel)
+                let dest = base.appendingPathComponent(BatchArchives.folderName(archive))
+                XCTAssertTrue(try fm.contentsOfDirectory(atPath: dest.path).isEmpty)
+                XCTAssertEqual(try FileChecksums.digest(archive, algorithm: .sha256), before)
+            }
+        }
+    }
+    func testRealTARSymbolicAndHardLinksAreRejected() async throws {
+        let base = try root(), seven = try engine(), fm = FileManager.default
+        let source = base.appendingPathComponent("source")
+        try fm.createDirectory(at: source, withIntermediateDirectories: false)
+        try Data("safe".utf8).write(to: source.appendingPathComponent("payload"))
+        for kind in ["symbolic", "hard"] {
+            let link = source.appendingPathComponent(kind)
+            if kind == "symbolic" { try fm.createSymbolicLink(atPath: link.path, withDestinationPath: "../outside") }
+            else { try fm.linkItem(at: source.appendingPathComponent("payload"), to: link) }
+            let archive = base.appendingPathComponent(kind + ".tar"), runner = CLIRunner()
+            let made = try await runner.run(executable: "/usr/bin/tar", arguments: ["-cf", archive.path, "--format", "pax", "--no-mac-metadata", "--", "payload", kind], directory: source) { _, _ in }
+            XCTAssertEqual(made.status, 0, made.stderr)
+            let listing = try await runner.run(executable: seven, arguments: ArchiveCommands.list(archive, password: "", using: .sevenZip)) { _, _ in }
+            XCTAssertEqual(listing.status, 0, listing.stderr)
+            XCTAssertTrue(listing.archiveEntries(backend: .sevenZip).contains { $0.isLink }, listing.stdout)
+            do {
+                _ = try await BatchExtractor.extract(archive, parent: base, engine: seven, runner: runner, password: "", encoding: .auto, policy: .skip, conflict: { _ in .skip }, update: { _, _ in })
+                XCTFail("Accepted \(kind) link")
+            } catch { print("LINK MATRIX: \(kind) sha256=\(try FileChecksums.digest(archive, algorithm: .sha256)) refusal=\(error.localizedDescription)") }
+            XCTAssertFalse(fm.fileExists(atPath: base.appendingPathComponent("outside").path))
+            XCTAssertTrue(try fm.contentsOfDirectory(atPath: base.appendingPathComponent(kind).path).isEmpty)
+        }
+    }
+    func testIsolatedDiskFailureDoesNotPublishArchive() async throws {
+        guard let path = ProcessInfo.processInfo.environment["ARCHIVEDESK_TEST_SMALL_VOLUME"] else { throw XCTSkip("Requires a dedicated small disposable mounted volume") }
+        let parent = URL(fileURLWithPath: path), fm = FileManager.default, seven = try engine()
+        // Refuse arbitrary user disks: the runner must create this exact marker on its isolated image.
+        guard try String(contentsOf: parent.appendingPathComponent(".archivedesk-disposable-test-volume")).trimmingCharacters(in: .whitespacesAndNewlines) == "ArchiveDesk QA 2026-11-07" else { throw ArchiveError.invalid("Missing disposable-volume marker") }
+        let free = try XCTUnwrap(DiskSpace.available(at: parent))
+        guard free < 256 * 1024 * 1024 else { throw ArchiveError.invalid("Test volume is not bounded below 256 MiB") }
+        let base = try root(), input = base.appendingPathComponent("large.bin"), output = parent.appendingPathComponent("never-publish.7z")
+        fm.createFile(atPath: input.path, contents: nil)
+        let handle = try FileHandle(forWritingTo: input); try handle.truncate(atOffset: 256 * 1024 * 1024); try handle.close()
+        XCTAssertThrowsError(try DiskSpace.require(256 * 1024 * 1024, at: parent))
+        var options = CreationOptions(); options.format = .sevenZip; options.level = 0
+        var diagnostics = ""
+        do {
+            _ = try await ArchiveCreator.create(output: output, inputs: [input], password: "", headers: false, volumeMB: 0, recovery: 0, options: options, executable: seven, runner: CLIRunner()) { a, b in diagnostics = a + b }
+            XCTFail("Published an oversized archive")
+        } catch { print("DISK MATRIX: initialFree=\(free) refusal=\(error.localizedDescription) engine=\(diagnostics)") }
+        XCTAssertFalse(fm.fileExists(atPath: output.path))
+        XCTAssertFalse(try fm.contentsOfDirectory(atPath: parent.path).contains { $0.hasPrefix(".ArchiveDesk-create-") || $0.hasSuffix(".partial") })
+        XCTAssertEqual(try input.resourceValues(forKeys: [.fileSizeKey]).fileSize, 256 * 1024 * 1024)
+    }
+    func testExtractionStagingUsesChosenVolumeAndRejectsSymlinkParent() throws {
+        let base = try root(), fm = FileManager.default
+        let stage = try ExtractionStaging.create(in: base)
+        XCTAssertEqual(stage.deletingLastPathComponent().standardizedFileURL, base.standardizedFileURL)
+        XCTAssertTrue(stage.lastPathComponent.hasPrefix(".ArchiveDesk-extract-"))
+        let a = try fm.attributesOfFileSystem(forPath: base.path), b = try fm.attributesOfFileSystem(forPath: stage.path)
+        XCTAssertEqual(a[.systemNumber] as? NSNumber, b[.systemNumber] as? NSNumber)
+        XCTAssertEqual((try fm.attributesOfItem(atPath: stage.path)[.posixPermissions] as? NSNumber)?.intValue, 0o700)
+        let alias = base.appendingPathComponent("alias")
+        try fm.createSymbolicLink(at: alias, withDestinationURL: base)
+        XCTAssertThrowsError(try ExtractionStaging.create(in: alias))
+    }
+    func testBatchExtractionUsesDestinationStageAndCleansIt() async throws {
+        let base = try root(), seven = try engine(), fm = FileManager.default
+        let archive = base.appendingPathComponent("valid.zip"), runner = CLIRunner()
+        try storedZIP(Array("inside.txt".utf8)).write(to: archive)
+        var sawDestinationStage = false
+        runner.observe = { _ in
+            if let names = try? fm.contentsOfDirectory(atPath: base.path), names.contains(where: { $0.hasPrefix(".ArchiveDesk-extract-") }) { sawDestinationStage = true }
+        }
+        let result = try await BatchExtractor.extract(archive, parent: base, engine: seven, runner: runner, password: "", encoding: .auto, policy: .skip, conflict: { _ in .skip }, update: { _, _ in })
+        XCTAssertTrue(sawDestinationStage)
+        XCTAssertEqual(try Data(contentsOf: result.appendingPathComponent("inside.txt")), Data("test".utf8))
+        XCTAssertFalse(try fm.contentsOfDirectory(atPath: base.path).contains { $0.hasPrefix(".ArchiveDesk-extract-") })
+        let bad = base.appendingPathComponent("bad.zip"); try Data("bad".utf8).write(to: bad)
+        do { _ = try await BatchExtractor.extract(bad, parent: base, engine: seven, runner: runner, password: "", encoding: .auto, policy: .skip, conflict: { _ in .skip }, update: { _, _ in }); XCTFail("Accepted corrupt archive") } catch { }
+        XCTAssertFalse(try fm.contentsOfDirectory(atPath: base.path).contains { $0.hasPrefix(".ArchiveDesk-extract-") })
+    }
+    func testDirectExtractionSkipsExistingFilesWithoutStaging() async throws {
+        let base = try root(), seven = try engine(), fm = FileManager.default
+        let source = base.appendingPathComponent("source"), nested = source.appendingPathComponent("nested")
+        try fm.createDirectory(at: nested, withIntermediateDirectories: true)
+        try Data("test".utf8).write(to: nested.appendingPathComponent("inside.txt"))
+        try Data("new".utf8).write(to: nested.appendingPathComponent("new.txt"))
+        for encoding in [ZIPNameEncoding.auto, .gb18030] {
+        let archive = base.appendingPathComponent("direct-\(encoding.rawValue).zip")
+        let made = try await CLIRunner().run(executable: seven, arguments: ["a", "-tzip", "-mx=0", "--", archive.path, "nested"], directory: source) { _, _ in }
+        XCTAssertEqual(made.status, 0, made.stderr)
+        var sawStage = false
+        let runner = CLIRunner()
+        runner.observe = { _ in if let names = try? fm.contentsOfDirectory(atPath: base.path), names.contains(where: { $0.hasPrefix(".ArchiveDesk-extract-") }) { sawStage = true } }
+        let destination = try await BatchExtractor.extract(archive, parent: base, engine: seven, runner: runner, password: "", encoding: encoding, policy: .replace, conflict: { _ in XCTFail("Direct mode must skip conflicts"); return .replace }, update: { _, _ in }, useStaging: false)
+        XCTAssertEqual(try Data(contentsOf: destination.appendingPathComponent("nested/inside.txt")), Data("test".utf8))
+        let sentinel = Data("user content".utf8)
+        try sentinel.write(to: destination.appendingPathComponent("nested/inside.txt"))
+        try fm.removeItem(at: destination.appendingPathComponent("nested/new.txt"))
+        _ = try await BatchExtractor.extract(archive, parent: base, engine: seven, runner: runner, password: "", encoding: encoding, policy: .ask, conflict: { _ in .skip }, update: { _, _ in }, useStaging: false)
+        XCTAssertEqual(try Data(contentsOf: destination.appendingPathComponent("nested/inside.txt")), sentinel)
+        XCTAssertEqual(try Data(contentsOf: destination.appendingPathComponent("nested/new.txt")), Data("new".utf8))
+        XCTAssertFalse(sawStage)
+        XCTAssertFalse(try fm.contentsOfDirectory(atPath: base.path).contains { $0.hasPrefix(".ArchiveDesk-extract-") })
+        }
+    }
+    func testDirectConflictChoicesAndCancelPreserveOriginals() async throws {
+        let base = try root(), seven = try engine(), fm = FileManager.default
+        let source = base.appendingPathComponent("source")
+        try fm.createDirectory(at: source, withIntermediateDirectories: false)
+        for name in ["a.txt", "b.txt"] { try Data(("new-" + name).utf8).write(to: source.appendingPathComponent(name)) }
+        let archive = base.appendingPathComponent("conflicts.zip")
+        let made = try await CLIRunner().run(executable: seven, arguments: ["a", "-tzip", "--", archive.path, "a.txt", "b.txt"], directory: source) { _, _ in }
+        XCTAssertEqual(made.status, 0, made.stderr)
+        let listing = try await CLIRunner().run(executable: seven, arguments: ArchiveCommands.list(archive, password: "", using: .sevenZip)) { _, _ in }
+        let rows = listing.archiveEntries(backend: .sevenZip)
+        for encoding in [ZIPNameEncoding.auto, .gb18030] {
+            for mode in ["mixed", "all", "cancel"] {
+                let destination = base.appendingPathComponent(encoding.rawValue + mode)
+                try fm.createDirectory(at: destination, withIntermediateDirectories: false)
+                for name in ["a.txt", "b.txt"] { try Data(("old-" + name).utf8).write(to: destination.appendingPathComponent(name)) }
+                var prompts = 0
+                do {
+                    let report = try await DirectExtractor.extract(archive, entries: rows, destination: destination, selected: [], engine: seven, password: "", encoding: encoding, runner: CLIRunner(), update: { _, _ in }, conflict: { path in
+                        prompts += 1
+                        if mode == "cancel" { return .cancel }
+                        if mode == "all" { return .replaceAll }
+                        return path == "a.txt" ? .replace : .skip
+                    })
+                    XCTAssertNotEqual(mode, "cancel")
+                    XCTAssertEqual(prompts, mode == "all" ? 1 : 2)
+                    XCTAssertEqual(report.backups, mode == "all" ? 2 : 1)
+                } catch is CancellationError { XCTAssertEqual(mode, "cancel") }
+                XCTAssertEqual(try Data(contentsOf: destination.appendingPathComponent("a.txt")), Data(((mode == "cancel" ? "old-" : "new-") + "a.txt").utf8))
+                XCTAssertEqual(try Data(contentsOf: destination.appendingPathComponent("b.txt")), Data(((mode == "all" ? "new-" : "old-") + "b.txt").utf8))
+                let backups = try fm.contentsOfDirectory(at: destination, includingPropertiesForKeys: nil).filter { $0.lastPathComponent.hasPrefix("ArchiveDesk-backup-") }
+                XCTAssertEqual(backups.count, mode == "cancel" ? 0 : mode == "all" ? 2 : 1)
+                for backup in backups { XCTAssertTrue(String(data: try Data(contentsOf: backup), encoding: .utf8)?.hasPrefix("old-") == true) }
+            }
+        }
+    }
+    func testDirectPackageExtractionDoesNotForceStaging() async throws {
+        let base = try root(), archive = base.appendingPathComponent("direct.ipa")
+        try storedZIP(Array("Payload/Test.app/Info.plist".utf8)).write(to: archive)
+        let destination = try await BatchExtractor.extract(archive, parent: base, engine: try engine(), runner: CLIRunner(), password: "", encoding: .auto, policy: .ask, conflict: { _ in .skip }, update: { _, _ in }, useStaging: false)
+        XCTAssertEqual(try Data(contentsOf: destination.appendingPathComponent("Payload/Test.app/Info.plist")), Data("test".utf8))
+        XCTAssertFalse(try FileManager.default.contentsOfDirectory(atPath: base.path).contains { $0.hasPrefix(".ArchiveDesk-extract-") })
+    }
+    func testDirectExtractionRejectsSymlinkAncestorAndHardLinkTarget() async throws {
+        let base = try root(), seven = try engine(), fm = FileManager.default
+        let destination = base.appendingPathComponent("destination"), outside = base.appendingPathComponent("outside")
+        try fm.createDirectory(at: destination, withIntermediateDirectories: false)
+        try fm.createDirectory(at: outside, withIntermediateDirectories: false)
+        let archive = base.appendingPathComponent("link.zip")
+        try storedZIP(Array("alias/new.txt".utf8)).write(to: archive)
+        try fm.createSymbolicLink(at: destination.appendingPathComponent("alias"), withDestinationURL: outside)
+        let entry = ArchiveEntry(path: "alias/new.txt", size: "4", modified: "", isDirectory: false, isLink: false)
+        do { _ = try await DirectExtractor.extract(archive, entries: [entry], destination: destination, selected: [], engine: seven, password: "", encoding: .auto, runner: CLIRunner(), update: { _, _ in }); XCTFail("Followed symlink") } catch { }
+        XCTAssertTrue(try fm.contentsOfDirectory(atPath: outside.path).isEmpty)
+        let sentinel = outside.appendingPathComponent("sentinel")
+        try Data("keep".utf8).write(to: sentinel)
+        try fm.linkItem(at: sentinel, to: destination.appendingPathComponent("file.txt"))
+        let linked = ArchiveEntry(path: "file.txt", size: "4", modified: "", isDirectory: false, isLink: false)
+        do { _ = try await DirectExtractor.extract(archive, entries: [linked], destination: destination, selected: [], engine: seven, password: "", encoding: .auto, runner: CLIRunner(), update: { _, _ in }); XCTFail("Accepted hard link") } catch { }
+        XCTAssertEqual(try Data(contentsOf: sentinel), Data("keep".utf8))
+    }
+    func testDirectFailureNeverRemovesDestination() async throws {
+        let base = try root(), fm = FileManager.default, sentinel = base.appendingPathComponent("keep.txt")
+        try Data("keep".utf8).write(to: sentinel)
+        let archive = base.appendingPathComponent("bad.zip")
+        // A valid central directory with corrupt payload passes listing, then fails CRC during extraction.
+        var bytes = storedZIP(Array("partial.txt".utf8)); bytes[30 + "partial.txt".utf8.count] ^= 1
+        try bytes.write(to: archive)
+        let entry = ArchiveEntry(path: "partial.txt", size: "4", modified: "", isDirectory: false, isLink: false)
+        do { _ = try await DirectExtractor.extract(archive, entries: [entry], destination: base, selected: [], engine: try engine(), password: "", encoding: .auto, runner: CLIRunner(), update: { _, _ in }); XCTFail("Accepted corrupt CRC") }
+        catch { XCTAssertTrue(error.localizedDescription.contains("Incomplete files may remain"), error.localizedDescription) }
+        XCTAssertEqual(try Data(contentsOf: sentinel), Data("keep".utf8))
+        XCTAssertTrue(fm.fileExists(atPath: archive.path))
+        let original = Data("original".utf8)
+        try original.write(to: base.appendingPathComponent("partial.txt"))
+        do { _ = try await DirectExtractor.extract(archive, entries: [entry], destination: base, selected: [], engine: try engine(), password: "", encoding: .auto, runner: CLIRunner(), update: { _, _ in }, conflict: { _ in .replace }); XCTFail("Accepted corrupt replacement") } catch { }
+        let backups = try fm.contentsOfDirectory(at: base, includingPropertiesForKeys: nil).filter { $0.lastPathComponent.hasPrefix("ArchiveDesk-backup-") }
+        XCTAssertEqual(backups.count, 1)
+        XCTAssertEqual(try Data(contentsOf: XCTUnwrap(backups.first)), original)
+        XCTAssertEqual(try Data(contentsOf: sentinel), Data("keep".utf8))
+    }
     func storedZIP(_ name: [UInt8], payload: Data = Data("test".utf8)) -> Data {
         var data = Data()
         func le(_ value: UInt32, _ bytes: Int) { for n in 0..<bytes { data.append(UInt8(truncatingIfNeeded: value >> (n * 8))) } }

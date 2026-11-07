@@ -50,7 +50,12 @@ import ArchiveCore
     @Published var showCreate = false
     @Published var showExtraction = false
     @Published var extractionPolicy: ExtractionPolicy = .ask
-    @Published var extractionNewFolder = true
+    @Published var extractionNewFolder = UserDefaults.standard.bool(forKey: "extractionNewFolder") {
+        didSet { UserDefaults.standard.set(extractionNewFolder, forKey: "extractionNewFolder") }
+    }
+    @Published var extractionUseStaging = UserDefaults.standard.object(forKey: "extractionUseStaging") as? Bool ?? false {
+        didSet { UserDefaults.standard.set(extractionUseStaging, forKey: "extractionUseStaging") }
+    }
     @Published var extractionOpenFolder = true
     @Published var editRefusal = "Open an archive first."
     private var extractionSelection: [String] = []
@@ -317,7 +322,7 @@ import ArchiveCore
         panel.prompt = language.text("Choose Extraction Location")
         guard panel.runModal() == .OK, let parent = panel.url else { return }
         let jobs = queue.map { BatchArchive(source: $0.source) }; queue = jobs
-        let engine = resolvedSevenZip, policy = extractionPolicy, engineRunner = runner
+        let engine = resolvedSevenZip, policy = extractionPolicy, engineRunner = runner, useStaging = extractionUseStaging
         monitorLocation = parent; busy = true; queueRunning = true
         presentTaskProgress("Batch extraction queue")
         exportTask = Task {
@@ -327,7 +332,7 @@ import ArchiveCore
                     await self.resetConflictChoice()
                     return try await BatchExtractor.extract(job.source, parent: parent, engine: engine, runner: engineRunner, password: secret, encoding: encoding, policy: policy, conflict: { path in await self.askConflict(path) }, update: { a, b in
                         Task { @MainActor in self.stdout = a; self.stderr = b }
-                    }, progress: { report in Task { @MainActor in self.updateTaskPhase("Publishing files", fraction: report.fraction); self.currentTaskFile = report.currentFile } })
+                    }, progress: { report in Task { @MainActor in self.updateTaskPhase("Publishing files", fraction: report.fraction); self.currentTaskFile = report.currentFile } }, useStaging: useStaging)
                 }, update: { job in await self.acceptJob(job) })
             }
             _ = await withTaskCancellationHandler(operation: { await work.value }, onCancel: { work.cancel(); engineRunner.cancel() })
@@ -438,19 +443,19 @@ import ArchiveCore
         let panel = NSOpenPanel(); panel.canChooseDirectories = true; panel.canChooseFiles = false; panel.prompt = language.text("Choose Extraction Location")
         guard panel.runModal() == .OK, let parent = panel.url else { return }
         let destination = extractionNewFolder ? parent.appendingPathComponent(archive.deletingPathExtension().lastPathComponent + "-" + String(UUID().uuidString.prefix(8)), isDirectory: true) : parent
-        let stage = FileManager.default.temporaryDirectory.appendingPathComponent("ArchiveDesk-extract-" + UUID().uuidString)
         do {
             try ExtractionMerger.checkDirectory(parent)
             if extractionNewFolder { try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: false) }
-            try FileManager.default.createDirectory(at: stage, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+            let useStaging = extractionUseStaging
+            let stage = useStaging ? try ExtractionStaging.create(in: parent) : destination
             monitorLocation = destination
             showExtraction = false; busy = true; stdout = ""; stderr = ""; status = language.text("Extracting to {0}", destination.lastPathComponent)
             presentTaskProgress("Extracting")
             let source = session?.workingURL ?? archive, chosen = extractionSelection, secret = password, engine = resolvedSevenZip, engineRunner = runner
             let policy = extractionPolicy, openFolder = extractionOpenFolder, encoding = zipEncoding
-            let mobile = packageKind != nil
+            let mobile = packageKind != nil && useStaging
             exportTask = Task {
-                defer { busy = false; progress = nil; try? FileManager.default.removeItem(at: stage) }
+                defer { busy = false; progress = nil; if useStaging { try? FileManager.default.removeItem(at: stage) } }
                 do {
                     let work = Task.detached(priority: .userInitiated) {
                         let log: (String, String) -> Void = { a, b in
@@ -468,6 +473,9 @@ import ArchiveCore
                             _ = try ExtractionSafety.validate(rows, compressedBytes: compressed)
                             let selectedRows = chosen.isEmpty ? rows : rows.filter { row in chosen.contains { row.path == $0 || row.path.hasPrefix($0.trimmingCharacters(in: CharacterSet(charactersIn: "/")) + "/") } }
                             let estimated = try ExtractionSafety.validate(selectedRows)
+                            if !useStaging {
+                                return try await DirectExtractor.extract(source, entries: rows, destination: destination, selected: chosen, engine: engine, password: secret, encoding: encoding, runner: engineRunner, update: log, conflict: { path in await self.askConflict(path) })
+                            }
                             try DiskSpace.requireStaging(estimated, stage: stage, destination: destination)
                             try Task.checkCancellation()
                             let extracted = try await engineRunner.run(executable: engine, arguments: ArchiveCommands.extract(source, destination: stage, selected: chosen, password: secret, using: .sevenZip, encoding: encoding), password: secret, diskGuard: stage, update: log)
@@ -506,7 +514,7 @@ import ArchiveCore
         let restoreProgress = progressWindow.isVisible
         progressWindow.hide() // Do not cover a conflict sheet with the progress panel.
         alert.informativeText = path + "\n" + language.text("Replacing keeps a backup beside the existing file.")
-        for title in ["Skip", "Replace", "Rename", "Cancel Task"] { alert.addButton(withTitle: language.text(title)) }
+        for title in ["Do not replace", "Replace this file", "Replace all", "Cancel Task"] { alert.addButton(withTitle: language.text(title)) }
         guard let window = NSApp.windows.first(where: { $0.isVisible && $0.canBecomeMain }) else { return .cancel }
         return await withCheckedContinuation { continuation in
             alert.beginSheetModal(for: window.attachedSheet ?? window) { response in
@@ -516,7 +524,7 @@ import ArchiveCore
                 switch response {
                 case .alertFirstButtonReturn: choice = .skip
                 case .alertSecondButtonReturn: choice = .replace
-                case .alertThirdButtonReturn: choice = .rename
+                case .alertThirdButtonReturn: choice = .replaceAll; self.conflictForAll = .replace
                 default: choice = .cancel
                 }
                 if alert.suppressionButton?.state == .on { self.conflictForAll = choice }

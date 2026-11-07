@@ -242,13 +242,14 @@ struct ExtractionOptionsView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
             Text(language.text("Extraction Options")).font(.title2)
-            Toggle(language.text("Create a new subfolder"), isOn: $model.extractionNewFolder)
+            Text(language.text(model.extractionUseStaging ? "Staging uses the destination disk. Files are verified before publication." : "Direct mode asks before replacing existing files and keeps originals as backups. Failed or cancelled tasks may leave incomplete files.")).font(.caption).foregroundStyle(.secondary)
             Picker(language.text("When files already exist"), selection: $model.extractionPolicy) {
                 ForEach(ExtractionPolicy.allCases, id: \.self) { Text(language.text($0.rawValue)).tag($0) }
-            }.disabled(model.extractionNewFolder)
-            Text(language.text("Update mode adds missing files and replaces existing files only when the extracted copy is newer. Replaced files are kept as backups. Folder/file conflicts and links are refused.")).font(.caption).foregroundStyle(.secondary)
+            }.disabled(model.extractionNewFolder || !model.extractionUseStaging)
+            if model.extractionUseStaging {
+                Text(language.text("Update mode adds missing files and replaces existing files only when the extracted copy is newer. Replaced files are kept as backups. Folder/file conflicts and links are refused.")).font(.caption).foregroundStyle(.secondary)
+            }
             Toggle(language.text("Open destination after extraction"), isOn: $model.extractionOpenFolder)
-            Text(language.text("Files are staged and checked by the engine before publication (CRC where available). Cancellation keeps completed files but removes the current partial file. General archives are limited by disk space and index memory; package inspection has separate limits.")).font(.caption).foregroundStyle(.secondary)
             HStack {
                 Spacer()
                 Button(language.text("Cancel")) { dismiss() }.keyboardShortcut(.cancelAction)
@@ -439,6 +440,10 @@ struct SettingsView: View {
             }
             Text(language.text("Language packs contain text only; missing entries fall back to English. System dialogs and raw CLI logs may use the system or tool language.")).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             Divider()
+            Text(language.text("Extraction settings")).font(.headline)
+            Toggle(language.text("Create a new subfolder (random name)"), isOn: $model.extractionNewFolder)
+            Toggle(language.text("Use extraction staging"), isOn: $model.extractionUseStaging)
+            Text(language.text("Both options are off by default. Direct extraction asks before replacing files; replaced originals are kept as backups.")).font(.caption).foregroundStyle(.secondary)
             Picker(language.text("Memory Usage"), selection: $model.memoryMode) {
                 ForEach(MemoryMode.allCases, id: \.self) { Text(language.text($0.rawValue)).tag($0) }
             }

@@ -4,6 +4,11 @@
   "name": "English",
   "locale": "en",
   "strings": {
+    "Use extraction staging": "Use extraction staging",
+    "Staging uses the destination disk. Files are verified before publication. Package export requires staging.": "Staging uses the destination disk. Files are verified before publication. Package export requires staging.",
+    "Direct mode skips existing files. Failed or cancelled tasks may leave incomplete files.": "Direct mode skips existing files. Failed or cancelled tasks may leave incomplete files.",
+    "Direct extraction failed. Incomplete files may remain in the destination. Check the task log.": "Direct extraction failed. Incomplete files may remain in the destination. Check the task log.",
+    "Package export requires staging.": "Package export requires staging.",
     "Password": "Password",
     "Password required": "Password required",
     "Incorrect password. Try again.": "Incorrect password. Try again.",
@@ -448,7 +453,19 @@
     "Hide progress": "Hide progress",
     "Hiding this window does not cancel the task.": "Hiding this window does not cancel the task.",
     "Final task report · resource values are the last sample.": "Final task report · resource values are the last sample.",
-    "The engine did not report a final percentage.": "The engine did not report a final percentage."
+    "The engine did not report a final percentage.": "The engine did not report a final percentage.",
+    "Do not replace": "Do not replace",
+    "Replace this file": "Replace this file",
+    "Replace all": "Replace all",
+    "Create a new subfolder (random name)": "Create a new subfolder (random name)",
+    "Extraction settings": "Extraction settings",
+    "Both options are off by default. Direct extraction asks before replacing files; replaced originals are kept as backups.": "Both options are off by default. Direct extraction asks before replacing files; replaced originals are kept as backups.",
+    "Direct mode asks before replacing existing files and keeps originals as backups. Failed or cancelled tasks may leave incomplete files.": "Direct mode asks before replacing existing files and keeps originals as backups. Failed or cancelled tasks may leave incomplete files.",
+    "Rename incoming files requires extraction staging.": "Rename incoming files requires extraction staging.",
+    "The destination changed while awaiting a conflict decision.": "The destination changed while awaiting a conflict decision.",
+    "The source archive cannot be replaced during direct extraction.": "The source archive cannot be replaced during direct extraction.",
+    "No matching archive entries.": "No matching archive entries.",
+    "Staging uses the destination disk. Files are verified before publication.": "Staging uses the destination disk. Files are verified before publication."
   },
   "sourceLanguage": "en"
 }

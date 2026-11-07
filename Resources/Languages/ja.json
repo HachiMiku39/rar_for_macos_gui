@@ -4,6 +4,11 @@
   "name": "日本語",
   "locale": "ja",
   "strings": {
+    "Use extraction staging": "展開用一時領域を使用",
+    "Staging uses the destination disk. Files are verified before publication. Package export requires staging.": "一時領域は展開先ディスクに作成され、検証後に公開します。IPA/APK の書き出しには一時領域が必要です。",
+    "Direct mode skips existing files. Failed or cancelled tasks may leave incomplete files.": "直接展開は既存ファイルをスキップします。失敗やキャンセル時に不完全なファイルが残る場合があります。",
+    "Direct extraction failed. Incomplete files may remain in the destination. Check the task log.": "直接展開に失敗しました。展開先に不完全なファイルが残る場合があります。ログを確認してください。",
+    "Package export requires staging.": "IPA/APK の書き出しには一時領域が必要です。",
     "Password": "パスワード",
     "Password required": "パスワードが必要です",
     "Incorrect password. Try again.": "パスワードが正しくありません。もう一度お試しください。",
@@ -413,7 +418,7 @@
     "Links and special files cannot be exported.": "リンクや特殊ファイルは書き出せません。",
     "A file conflicts with an existing directory or special file.": "ファイルが既存フォルダまたは特殊ファイルと競合しています。",
     "Written: {0} · Skipped: {1} · Renamed: {2} · Backups: {3}": "書き込み：{0} · スキップ：{1} · 名前変更：{2} · バックアップ：{3}",
-    "File already exists": "ファイルは既に存在します",
+    "File already exists": "ファイルが既に存在します",
     "Replacing keeps a backup beside the existing file.": "置き換える際、元のファイルと同じフォルダにバックアップを残します。",
     "Skip": "スキップ",
     "Rename": "名前を変更",
@@ -448,7 +453,19 @@
     "Hide progress": "進捗ウインドウを隠す",
     "Hiding this window does not cancel the task.": "このウインドウを隠してもタスクは続行します。",
     "Final task report · resource values are the last sample.": "タスク結果 · リソース値は最後のサンプルです。",
-    "The engine did not report a final percentage.": "エンジンは最終パーセントを報告しませんでした。"
+    "The engine did not report a final percentage.": "エンジンは最終パーセントを報告しませんでした。",
+    "Do not replace": "上書きしない",
+    "Replace this file": "このファイルを上書き",
+    "Replace all": "すべて上書き",
+    "Create a new subfolder (random name)": "ランダム名のサブフォルダを作成",
+    "Extraction settings": "展開設定",
+    "Both options are off by default. Direct extraction asks before replacing files; replaced originals are kept as backups.": "初期設定では両方オフです。直接展開では同名ファイルの処理を確認し、上書き前のファイルをバックアップとして残します。",
+    "Direct mode asks before replacing existing files and keeps originals as backups. Failed or cancelled tasks may leave incomplete files.": "直接展開では同名ファイルの処理を確認し、元ファイルをバックアップとして残します。失敗やキャンセルで不完全なファイルが残る場合があります。",
+    "Rename incoming files requires extraction staging.": "展開ファイルの名前変更にはステージングが必要です。",
+    "The destination changed while awaiting a conflict decision.": "同名ファイルの処理を確認中に出力先が変更されました。",
+    "The source archive cannot be replaced during direct extraction.": "直接展開で元のアーカイブを上書きすることはできません。",
+    "No matching archive entries.": "一致するアーカイブ項目がありません。",
+    "Staging uses the destination disk. Files are verified before publication.": "出力先ディスクでステージングし、ファイルを検証してから公開します。"
   },
   "sourceLanguage": "en"
 }
