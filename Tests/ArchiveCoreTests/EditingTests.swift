@@ -36,6 +36,28 @@ final class EditingTests: XCTestCase {
             }
         }
     }
+    func testStagedConflictKeepsFileSavedDuringPrompt() async throws {
+        let r = try root(); defer { try? fm.removeItem(at: r) }
+        let stage = r.appendingPathComponent("stage"), dest = r.appendingPathComponent("dest")
+        try fm.createDirectory(at: stage, withIntermediateDirectories: false)
+        try fm.createDirectory(at: dest, withIntermediateDirectories: false)
+        let target = dest.appendingPathComponent("document.txt")
+        try Data("archive".utf8).write(to: stage.appendingPathComponent("document.txt"))
+        try Data("old".utf8).write(to: target)
+        do {
+            _ = try await ExtractionMerger.merge(from: stage, to: dest, policy: .ask) { _ in
+                do { try Data("new".utf8).write(to: target, options: .atomic) }
+                catch { XCTFail("Could not save the edited file: \(error)") }
+                return .replace
+            }
+            XCTFail("Stale replacement accepted")
+        } catch ArchiveError.invalid(let message) {
+            XCTAssertEqual(message, "The destination changed while awaiting a conflict decision.")
+        }
+        XCTAssertEqual(try Data(contentsOf: target), Data("new".utf8))
+        XCTAssertEqual(try fm.contentsOfDirectory(atPath: dest.path), ["document.txt"])
+    }
+
     func testUpdateSkipsNewerAndCancel() async throws {
         let r = try root(); defer { try? fm.removeItem(at: r) }
         let stage = r.appendingPathComponent("stage"), dest = r.appendingPathComponent("dest")
@@ -111,5 +133,51 @@ final class EditingTests: XCTestCase {
         }
         do { _ = try await task.value; XCTFail() } catch is CancellationError {} catch { XCTFail("\(error)") }
         XCTAssertEqual(try String(contentsOf: archive), "unchanged")
+    }
+
+    func testEditRefusesSameContentSavedAsNewFile() async throws {
+        guard let seven = ProcessInfo.processInfo.environment["ARCHIVEDESK_TEST_7ZZ"] else { throw XCTSkip("7-Zip not configured") }
+        let r = try root(); defer { try? fm.removeItem(at: r) }
+        let archive = r.appendingPathComponent("example.zip"), saved = r.appendingPathComponent("saved.zip")
+        for name in ["one.txt", "two.txt"] { try Data(name.utf8).write(to: r.appendingPathComponent(name)) }
+        let created = try await CLIRunner().run(executable: seven, arguments: ["a", "-tzip", archive.path, "one.txt", "two.txt"], directory: r) { _, _ in }
+        XCTAssertEqual(created.status, 0)
+        try fm.copyItem(at: archive, to: saved)
+        let savedInfo = try XCTUnwrap(ExtractionSafety.inspect(saved))
+        let hash = try ArchiveEditor.digest(saved)
+        do {
+            _ = try await ArchiveEditor.apply(.delete(["two.txt"]), archive: archive, sevenZip: seven, rar: "", runner: CLIRunner()) { _, _ in
+                // Simulate another editor saving the same bytes with atomic replacement.
+                if self.fm.fileExists(atPath: saved.path) { XCTAssertEqual(rename(saved.path, archive.path), 0) }
+            }
+            XCTFail("An edit must retain the version saved by the other editor")
+        } catch ArchiveError.invalid { }
+        XCTAssertEqual(try ExtractionSafety.inspect(archive)?.st_ino, savedInfo.st_ino)
+        XCTAssertEqual(try ArchiveEditor.digest(archive), hash)
+        XCTAssertFalse(try fm.contentsOfDirectory(atPath: r.path).contains { $0.contains("ArchiveDesk") })
+    }
+
+    func testEditPublicationFailureRestoresOriginal() throws {
+        let r = try root(); defer { try? fm.removeItem(at: r) }
+        let archive = r.appendingPathComponent("example.zip")
+        try Data("original".utf8).write(to: archive)
+        let original = try XCTUnwrap(ExtractionSafety.inspect(archive))
+        XCTAssertThrowsError(try ArchiveEditor.publishEditedCopy(r.appendingPathComponent("missing"), to: archive, original: original))
+        XCTAssertEqual(try ExtractionSafety.inspect(archive)?.st_ino, original.st_ino)
+        XCTAssertEqual(try Data(contentsOf: archive), Data("original".utf8))
+        XCTAssertEqual(try fm.contentsOfDirectory(atPath: r.path), ["example.zip"])
+    }
+
+    func testEditRejectsHardLinkedOriginalBeforeLaunchingEngine() async throws {
+        let r = try root(); defer { try? fm.removeItem(at: r) }
+        let archive = r.appendingPathComponent("example.zip"), alias = r.appendingPathComponent("alias.zip")
+        try Data("original".utf8).write(to: archive)
+        try fm.linkItem(at: archive, to: alias)
+        do {
+            _ = try await ArchiveEditor.apply(.delete(["a"]), archive: archive, sevenZip: "", rar: "", runner: CLIRunner()) { _, _ in }
+            XCTFail("Editing must not treat another hard link as an independent backup")
+        } catch ArchiveError.invalid(let message) { XCTAssertEqual(message, "Choose a regular file, not a link or device.") }
+        XCTAssertEqual(try ExtractionSafety.inspect(archive)?.st_nlink, 2)
+        XCTAssertEqual(try Data(contentsOf: alias), Data("original".utf8))
     }
 }

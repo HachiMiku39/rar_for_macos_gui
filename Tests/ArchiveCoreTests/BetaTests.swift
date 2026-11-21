@@ -235,6 +235,93 @@ final class BetaTests: XCTestCase {
             }
         }
     }
+    func testDirectConflictKeepsFileSavedDuringPromptAndReversesPreparation() async throws {
+        let destination = try root()
+        let names = ["a.txt", "b.txt"]
+        let rows = names.map { ArchiveEntry(path: $0, size: "3", modified: "", isDirectory: false, isLink: false) }
+        for name in names { try Data("old".utf8).write(to: destination.appendingPathComponent(name)) }
+        let edited = destination.appendingPathComponent("b.txt")
+        do {
+            _ = try await DirectExtractor.extract(destination.appendingPathComponent("unused.zip"), entries: rows,
+                destination: destination, selected: [], engine: "/usr/bin/false", password: "", encoding: .auto,
+                runner: CLIRunner(), update: { _, _ in }, conflict: { name in
+                    if name == "b.txt" {
+                        do { try Data("new".utf8).write(to: edited, options: .atomic) }
+                        catch { XCTFail("Could not save the edited file: \(error)") }
+                    }
+                    return .replace
+                })
+            XCTFail("Stale replacement accepted")
+        } catch ArchiveError.invalid(let message) {
+            XCTAssertEqual(message, "The destination changed while awaiting a conflict decision.")
+        }
+        XCTAssertEqual(try Data(contentsOf: destination.appendingPathComponent("a.txt")), Data("old".utf8))
+        XCTAssertEqual(try Data(contentsOf: edited), Data("new".utf8))
+        XCTAssertEqual(Set(try FileManager.default.contentsOfDirectory(atPath: destination.path)), Set(names))
+    }
+
+    func testDirectSkipSurvivesRemovalAndCountsLaterConflicts() async throws {
+        let base = try root(), seven = try engine(), fm = FileManager.default
+        let source = base.appendingPathComponent("src"), selected = source.appendingPathComponent("folder")
+        try fm.createDirectory(at: selected, withIntermediateDirectories: true)
+        let omitted = " @\"?*.txt\"  ", names = [omitted, "late-same", "late-other", "new"]
+        for name in names { try Data("four".utf8).write(to: selected.appendingPathComponent(name)) }
+        try Data().write(to: source.appendingPathComponent("outside"))
+        let archive = base.appendingPathComponent("fixture.zip")
+        let created = try await CLIRunner().run(executable: seven, arguments: ["a", "-tzip", "--", archive.path, "folder", "outside"], directory: source) { _, _ in }
+        XCTAssertEqual(created.status, 0)
+        for encoding in [ZIPNameEncoding.auto, .gb18030] {
+            let destination = base.appendingPathComponent(encoding.rawValue), folder = destination.appendingPathComponent("folder")
+            try fm.createDirectory(at: folder, withIntermediateDirectories: true)
+            let skipped = folder.appendingPathComponent(omitted)
+            try Data("old".utf8).write(to: skipped)
+            let runner = CLIRunner()
+            let list = try await runner.run(executable: seven, arguments: ArchiveCommands.list(archive, password: "", using: .sevenZip, encoding: encoding)) { _, _ in }
+            runner.observe = { event in
+                guard event.state == .queued else { return }
+                do {
+                    try fm.removeItem(at: skipped)
+                    try Data("kept".utf8).write(to: folder.appendingPathComponent("late-same"))
+                    try Data("kept original length".utf8).write(to: folder.appendingPathComponent("late-other"))
+                } catch { XCTFail("Failed to synchronize fixture: \(error)") }
+            }
+            let rows = list.archiveEntries(backend: .sevenZip)
+            let report = try await DirectExtractor.extract(archive, entries: rows, destination: destination, selected: ["folder"], engine: seven,
+                password: "", encoding: encoding, runner: runner, update: { _, _ in }, conflict: { path in
+                    XCTAssertEqual(path, "folder/" + omitted); return .skip
+                })
+            XCTAssertEqual(report.written, 1); XCTAssertEqual(report.skipped, 3)
+            XCTAssertFalse(fm.fileExists(atPath: skipped.path))
+            XCTAssertFalse(fm.fileExists(atPath: destination.appendingPathComponent("outside").path))
+            XCTAssertEqual(try Data(contentsOf: folder.appendingPathComponent("late-same")), Data("kept".utf8))
+            XCTAssertEqual(try Data(contentsOf: folder.appendingPathComponent("late-other")), Data("kept original length".utf8))
+            XCTAssertEqual(try Data(contentsOf: folder.appendingPathComponent("new")), Data("four".utf8))
+        }
+    }
+
+    func testDirectEncryptedFileWithRedactedSummaryAndDirectoryOnly() async throws {
+        let base = try root(), seven = try engine(), fm = FileManager.default
+        let dir = base.appendingPathComponent("empty"), archive = base.appendingPathComponent("encrypted.7z")
+        try fm.createDirectory(at: dir, withIntermediateDirectories: false)
+        try Data("one".utf8).write(to: base.appendingPathComponent("note"))
+        let runner = CLIRunner(), secret = "Size"
+        let created = try await runner.run(executable: seven, arguments: ["a", "-t7z", "-pSize", "--", archive.path, "empty", "note"], directory: base) { _, _ in }
+        XCTAssertEqual(created.status, 0)
+        let listing = try await runner.run(executable: seven, arguments: ArchiveCommands.list(archive, password: secret, using: .sevenZip), password: secret) { _, _ in }
+        let rows = listing.archiveEntries(backend: .sevenZip), destination = base.appendingPathComponent("result")
+        try fm.createDirectory(at: destination, withIntermediateDirectories: false)
+        for (name, expectedFiles) in [("note", 1), ("empty", 0)] {
+            let result = try await DirectExtractor.extract(archive, entries: rows, destination: destination, selected: [name],
+                engine: seven, password: secret, encoding: .auto, runner: runner, update: { _, _ in })
+            XCTAssertEqual(result.written, expectedFiles)
+        }
+        XCTAssertEqual(try Data(contentsOf: destination.appendingPathComponent("note")), Data("one".utf8))
+        XCTAssertTrue(fm.fileExists(atPath: destination.appendingPathComponent("empty").path))
+        let skip = try await DirectExtractor.extract(archive, entries: rows, destination: destination, selected: [],
+            engine: seven, password: secret, encoding: .auto, runner: runner, update: { _, _ in }, conflict: { _ in .skip })
+        XCTAssertEqual(skip.written, 0); XCTAssertEqual(skip.skipped, 1)
+    }
+
     func testDirectPackageExtractionDoesNotForceStaging() async throws {
         let base = try root(), archive = base.appendingPathComponent("direct.ipa")
         try storedZIP(Array("Payload/Test.app/Info.plist".utf8)).write(to: archive)

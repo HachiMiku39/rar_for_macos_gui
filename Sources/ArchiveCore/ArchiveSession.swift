@@ -60,8 +60,8 @@ public enum ArchiveEditor {
     }
     public static func apply(_ edit: ArchiveEdit, archive: URL, sevenZip: String, rar: String, runner: CLIRunner, update: @escaping (String, String) -> Void) async throws -> URL {
         let fm = FileManager.default
-        let values = try archive.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
-        guard values.isRegularFile == true, values.isSymbolicLink != true else { throw ArchiveError.invalid("Editing requires a regular local archive file.") }
+        guard let original = try ExtractionSafety.inspect(archive), original.st_mode & S_IFMT == S_IFREG,
+              original.st_nlink == 1 else { throw ArchiveError.invalid("Choose a regular file, not a link or device.") }
         let before = try digest(archive)
         let root = archive.deletingLastPathComponent().appendingPathComponent(".ArchiveDesk-edit-" + UUID().uuidString)
         try fm.createDirectory(at: root, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
@@ -149,11 +149,22 @@ public enum ArchiveEditor {
         guard expectedFiles.isSubset(of: paths), Set(after.filter { !$0.isDirectory }.map(\.path)) == expectedFiles else { throw ArchiveError.invalid("The edited contents did not match the request. Nothing was replaced.") }
         try Task.checkCancellation()
         guard try digest(archive) == before else { throw ArchiveError.invalid("The archive changed during editing. Nothing was replaced.") }
+        return try publishEditedCopy(copy, to: archive, original: original)
+    }
+
+    static func publishEditedCopy(_ copy: URL, to archive: URL, original: stat) throws -> URL {
         let backup = archive.deletingLastPathComponent().appendingPathComponent(archive.lastPathComponent + ".ArchiveDesk-backup-" + UUID().uuidString)
-        try fm.copyItem(at: archive, to: backup)
-        guard try digest(backup) == before, try digest(archive) == before else { throw ArchiveError.invalid("The archive changed during editing. Nothing was replaced.") }
         try Task.checkCancellation()
-        guard Darwin.rename(copy.path, archive.path) == 0 else { throw ArchiveError.invalid("Cannot replace the archive. The original and backup were kept.") }
+        try ExtractionSafety.moveOriginal(archive, matching: original, to: backup)
+        // Once the original is safely backed up, publish immediately. Neither
+        // publication nor recovery may overwrite a concurrent save.
+        if renamex_np(copy.path, archive.path, UInt32(RENAME_EXCL)) != 0 {
+            let code = POSIXErrorCode(rawValue: errno) ?? .EIO
+            guard renamex_np(backup.path, archive.path, UInt32(RENAME_EXCL)) == 0 else {
+                throw ArchiveError.details("Original backup: {0}", [backup.path])
+            }
+            throw POSIXError(code)
+        }
         return backup
     }
 }
@@ -218,26 +229,25 @@ public enum ExtractionMerger {
             guard v.isSymbolicLink != true, v.isDirectory == true || v.isRegularFile == true else { throw ArchiveError.invalid("Links and special files cannot be exported.") }
             var target = destination.appendingPathComponent(relative)
             try checkDirectory(target.deletingLastPathComponent())
-            var exists = fm.fileExists(atPath: target.path)
-            // resourceValues also catches dangling symlinks (fileExists follows them).
-            if let old = try? target.resourceValues(forKeys: [.isSymbolicLinkKey, .isDirectoryKey, .isRegularFileKey]), old.isSymbolicLink == true { throw ArchiveError.invalid("The destination contains a link or is not a directory.") }
+            var original = try ExtractionSafety.inspect(target)
             if v.isDirectory == true {
-                if exists { try checkDirectory(target) } else {
+                if original != nil { try checkDirectory(target) } else {
                     try fm.createDirectory(at: target, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
                     directories.append((file, target))
                 }
                 continue
             }
-            if exists {
-                let old = try target.resourceValues(forKeys: [.isRegularFileKey, .contentModificationDateKey])
-                guard old.isRegularFile == true else { throw ArchiveError.invalid("A file conflicts with an existing directory or special file.") }
+            if let old = original {
+                guard old.st_mode & S_IFMT == S_IFREG else { throw ArchiveError.invalid("A file conflicts with an existing directory or special file.") }
                 let choice: ConflictChoice
                 switch policy {
                 case .ask: choice = replaceAll ? .replace : await conflict(relative)
                 case .skip: choice = .skip
                 case .rename: choice = .rename
                 case .replace: choice = .replace
-                case .update: choice = (v.contentModificationDate ?? .distantPast) > (old.contentModificationDate ?? .distantFuture) ? .replace : .skip
+                case .update:
+                    let modified = Date(timeIntervalSince1970: Double(old.st_mtimespec.tv_sec) + Double(old.st_mtimespec.tv_nsec) / 1_000_000_000)
+                    choice = (v.contentModificationDate ?? .distantPast) > modified ? .replace : .skip
                 }
                 try Task.checkCancellation()
                 switch choice {
@@ -246,14 +256,14 @@ public enum ExtractionMerger {
                 case .rename:
                     var n = 2
                     repeat { target = target.deletingLastPathComponent().appendingPathComponent((file.lastPathComponent as NSString).deletingPathExtension + " (\(n))" + (file.pathExtension.isEmpty ? "" : "." + file.pathExtension)); n += 1 } while fm.fileExists(atPath: target.path) || (try? target.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) == true
-                    exists = false; report.renamed += 1
+                    original = nil; report.renamed += 1
                 case .replaceAll: replaceAll = true
                 case .replace: break
                 }
             }
             try checkDirectory(target.deletingLastPathComponent())
             let before = report.processedBytes
-            if try ExtractionSafety.copyVerifiedFile(file, to: target, replacing: exists, progress: { copied, _ in
+            if try ExtractionSafety.copyVerifiedFile(file, to: target, expecting: original, progress: { copied, _ in
                 report.processedBytes = before + copied; notify()
             }) { report.backups += 1 }
             report.written += 1; notify()

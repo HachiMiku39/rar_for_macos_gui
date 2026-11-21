@@ -3,6 +3,20 @@ import Darwin
 @testable import ArchiveCore
 
 final class RuntimeTests: XCTestCase {
+    func testExtractionTotalsUseOnlyTerminalSummary() {
+        let earlier = Data("Everything is Ok\n\nFiles: 900\nSize: 900\nCompressed: 100\n".utf8)
+        let prefix = earlier + Data(repeating: 65, count: 600_000)
+        for (entries, bytes) in [(0, 0), (1, 4), (200_000, 16_000_000)] {
+            let count = entries == 1 ? "" : "Files: \(entries)\n"
+            let data = prefix + Data("\nEverything is Ok\n\n\(count)Size:       \(bytes)\nCompressed: 100\n".utf8)
+            XCTAssertEqual(ExtractionTotals(output: data, zipAdapter: false)?.files, entries)
+            XCTAssertEqual(ExtractionTotals(output: data, zipAdapter: false)?.bytes, UInt64(bytes))
+        }
+        XCTAssertNil(ExtractionTotals(output: prefix, zipAdapter: false))
+        XCTAssertNil(ExtractionTotals(output: earlier + Data("trailing unexpected output\n".utf8), zipAdapter: false))
+        XCTAssertNil(ExtractionTotals(output: Data("Everything is Ok\n\nFiles: ?\nSize: 0\nCompressed: 100\n".utf8), zipAdapter: false))
+        XCTAssertNil(ExtractionTotals(output: Data("Everything is Ok\n\nSize: 0\n".utf8), zipAdapter: true))
+    }
     func testProgressDecodingIsBoundedAndChunkSafe() {
         let parser = EngineProgressDecoder()
         parser.feed(Data(" 2".utf8)); parser.feed(Data("3% 1 - 日本語.txt\r".utf8))
@@ -196,6 +210,42 @@ final class RuntimeTests: XCTestCase {
         runner.observe = nil
         let next = try await runner.run(executable: "/usr/bin/true", arguments: []) { _, _ in }
         XCTAssertEqual(next.status, 0)
+    }
+    func testCancellingFinishedCallerCannotCancelNextRun() async throws {
+        let runner = CLIRunner()
+        let firstCompleted = expectation(description: "first engine released the runner")
+        let secondQueued = expectation(description: "second engine reserved the runner")
+        let releaseFirst = DispatchSemaphore(value: 0), releaseSecond = DispatchSemaphore(value: 0)
+        runner.observe = { event in
+            if event.operation == "first", event.state == .completed {
+                firstCompleted.fulfill()
+                XCTAssertEqual(releaseFirst.wait(timeout: .now() + 10), .success)
+            }
+            if event.operation == "second", event.state == .queued {
+                secondQueued.fulfill()
+                XCTAssertEqual(releaseSecond.wait(timeout: .now() + 10), .success)
+            }
+        }
+        let first = Task { try await runner.run(executable: "/usr/bin/true", arguments: ["first"]) { _, _ in } }
+        await fulfillment(of: [firstCompleted], timeout: 5)
+        let second = Task { try await runner.run(executable: "/usr/bin/true", arguments: ["second"]) { _, _ in } }
+        await fulfillment(of: [secondQueued], timeout: 5)
+        first.cancel()
+        releaseSecond.signal(); releaseFirst.signal()
+        let firstResult = try await first.value, secondResult = try await second.value
+        XCTAssertFalse(firstResult.cancelled)
+        XCTAssertFalse(secondResult.cancelled)
+        XCTAssertEqual(secondResult.status, 0)
+    }
+    func testCancellationAfterBinaryPublicationReportsCompletedOutput() async throws {
+        let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+        let output = root.appendingPathComponent("result.txt"), runner = CLIRunner()
+        let result = try await runner.run(executable: "/usr/bin/printf", arguments: ["payload"], outputFile: output) { _, _ in
+            if FileManager.default.fileExists(atPath: output.path) { runner.cancel() }
+        }
+        XCTAssertEqual(result.status, 0)
+        XCTAssertFalse(result.cancelled)
+        XCTAssertEqual(try Data(contentsOf: output), Data("payload".utf8))
     }
     func testBoundedLogsAndSecretRedaction() async throws {
         let runner = CLIRunner()

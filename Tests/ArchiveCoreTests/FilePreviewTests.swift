@@ -182,6 +182,17 @@ final class FilePreviewTests: XCTestCase {
         XCTAssertEqual(session.phase, .closed); XCTAssertNil(session.player)
         XCTAssertFalse(FileManager.default.fileExists(atPath: root.path))
     }
+    @MainActor func testFailedRequestRejectsLateResults() throws {
+        let session = PreviewSession(), directory = try root(), file = directory.appendingPathComponent("late.txt")
+        try Data("late".utf8).write(to: file)
+        let id = session.begin(name: "late.txt", kind: .text)
+        session.fail("first failure", requestID: id)
+        session.fail("late notification", requestID: id)
+        session.load(file, ownedRoot: directory, requestID: id)
+        XCTAssertEqual(session.message, "first failure")
+        XCTAssertEqual(session.phase, .failed)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: directory.path))
+    }
     @MainActor func testClosingLoadedPlayerReleasesItemAndObservers() async throws {
         let session = PreviewSession(), root = try root(), file = root.appendingPathComponent("track.wav")
         try wav().write(to: file)

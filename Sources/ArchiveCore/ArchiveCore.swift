@@ -259,5 +259,6 @@ public struct CLIResult {
     public let cancelled: Bool
     let listingOutput: String
     var parsedEntries: [ArchiveEntry]? = nil
+    var extractionTotals: ExtractionTotals? = nil
     public func archiveEntries(backend: Backend) -> [ArchiveEntry] { parsedEntries ?? ArchiveCommands.parse(listingOutput, backend: backend) }
 }

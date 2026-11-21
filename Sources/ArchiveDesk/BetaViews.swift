@@ -66,6 +66,7 @@ struct ChecksumRow: Identifiable {
     @Published var current = ""
     @Published var error: String?
     private var task: Task<Void, Never>?
+    private var currentFileID: UUID?
     func cancel() { task?.cancel() }
     func calculate(algorithm: ChecksumAlgorithm) {
         let panel = NSOpenPanel(); panel.allowsMultipleSelection = true; panel.canChooseDirectories = false
@@ -89,14 +90,18 @@ struct ChecksumRow: Identifiable {
     private func start(_ files: [(URL, ChecksumAlgorithm, String?)]) {
         rows = []; busy = true; fraction = 0; error = nil
         task = Task {
-            defer { busy = false }
+            defer { currentFileID = nil; busy = false }
             for (url, algorithm, expected) in files {
                 if Task.isCancelled { current = AppLanguage.shared.text("Cancelled"); break }
-                current = url.lastPathComponent; fraction = 0
+                let fileID = UUID()
+                currentFileID = fileID; current = url.lastPathComponent; fraction = 0
                 do {
                     let work = Task.detached(priority: .utility) {
                         try FileChecksums.digest(url, algorithm: algorithm) { done, total in
-                            Task { @MainActor in self.fraction = total == 0 ? 1 : min(1, Double(done) / Double(total)) }
+                            Task { @MainActor in
+                                guard self.currentFileID == fileID else { return }
+                                self.fraction = max(self.fraction, total == 0 ? 1 : min(1, Double(done) / Double(total)))
+                            }
                         }
                     }
                     let digest = try await withTaskCancellationHandler(operation: { try await work.value }, onCancel: { work.cancel() })

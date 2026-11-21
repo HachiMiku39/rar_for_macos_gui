@@ -2,6 +2,34 @@ import Foundation
 import Darwin
 
 public enum ArchiveTaskState: String { case queued, running, completed, failed, cancelled }
+
+struct ExtractionTotals {
+    let files: Int
+    let bytes: UInt64
+
+    // Read the final engine summary before display redaction. 7zz omits "Files: 1"
+    // for a lone file, but explicitly prints "Files: 0" when it skips every file.
+    init?(output: Data, zipAdapter: Bool) {
+        var lines = String(decoding: output.suffix(1024), as: UTF8.self)
+            .split(separator: "\n", omittingEmptySubsequences: false)
+        while lines.last == "" { lines.removeLast() }
+        func number(_ prefix: String) -> UInt64? {
+            guard let line = lines.last, line.hasPrefix(prefix) else { return nil }
+            let digits = line.dropFirst(prefix.count).drop(while: { $0 == " " })
+            guard !digits.isEmpty, digits.allSatisfy({ $0.isASCII && $0.isNumber }), let value = UInt64(digits) else { return nil }
+            lines.removeLast()
+            return value
+        }
+        if !zipAdapter, number("Compressed:") == nil { return nil }
+        guard let bytes = number("Size:") else { return nil }
+        let count = number("Files:")
+        let folders = number("Folders:")
+        if count == nil && (zipAdapter || folders != nil) { return nil }
+        guard lines.popLast() == "", lines.popLast() == "Everything is Ok",
+              let files = Int(exactly: count ?? 1), files > 0 || bytes == 0 else { return nil }
+        self.files = files; self.bytes = bytes
+    }
+}
 public struct ArchiveTaskSnapshot {
     public let id: UUID
     public var state: ArchiveTaskState = .queued
@@ -179,16 +207,15 @@ final class ListingDecoder {
 /// One run per runner; stdout/stderr are drained with fixed 64 KiB buffers.
 public final class CLIRunner: @unchecked Sendable {
     private let lock = NSLock()
-    private var active = false
+    private var activeRunID: UUID?
     private var pid: pid_t = 0
     private var cancelled = false
     private var cancelAt: Date?
     private var observer: ((ArchiveTaskSnapshot) -> Void)?
-    private var runID = UUID()
     public func resourceCounters() -> [String: ResourceCounters] {
         // Sampling under the reap lock prevents accidentally sampling a recycled PID.
         lock.withLock {
-            guard pid > 0, let value = ResourceCounters.readProcess(pid) else { return [:] }
+            guard let runID = activeRunID, pid > 0, let value = ResourceCounters.readProcess(pid) else { return [:] }
             return [runID.uuidString: value]
         }
     }
@@ -198,8 +225,11 @@ public final class CLIRunner: @unchecked Sendable {
     }
     public init() {}
     public func cancel() {
+        cancel(runID: nil)
+    }
+    private func cancel(runID: UUID?) {
         lock.withLock {
-            guard active else { return }
+            guard let activeRunID, runID == nil || activeRunID == runID else { return }
             cancelled = true
             if cancelAt == nil { cancelAt = Date() }
             if pid > 0 { kill(-pid, SIGTERM) }
@@ -222,30 +252,31 @@ public final class CLIRunner: @unchecked Sendable {
                 throw ArchiveError.details("Extraction tool failed to launch: {0}", ["Working directory does not exist."])
             }
         }
+        let runID = UUID()
         let reserved = lock.withLock { () -> Bool in
-            guard !active else { return false }
-            active = true; cancelled = false; cancelAt = nil; runID = UUID(); return true
+            guard activeRunID == nil else { return false }
+            activeRunID = runID; cancelled = false; cancelAt = nil; return true
         }
         guard reserved else { throw ArchiveError.invalid("An engine task is already running.") }
         return try await withTaskCancellationHandler(operation: {
             try await withCheckedThrowingContinuation { continuation in
                 DispatchQueue.global(qos: .userInitiated).async {
-                    var state = ArchiveTaskSnapshot(id: UUID(), operation: arguments.first ?? "Engine")
+                    var state = ArchiveTaskSnapshot(id: runID, operation: arguments.first ?? "Engine")
                     self.observe?(state)
                     do {
                         let result = try self.execute(executable, arguments, directory, password, outputFile, outputLimit, diskGuard, &state, update)
                         state.state = result.cancelled ? .cancelled : result.status == 0 ? .completed : .failed
                         if result.status != 0 { state.error = result.stderr }
-                        self.lock.withLock { self.active = false }
-                        self.observe?(state); continuation.resume(returning: result)
+                        let observer = self.lock.withLock { self.activeRunID = nil; return self.observer }
+                        observer?(state); continuation.resume(returning: result)
                     } catch {
                         state.state = error is CancellationError ? .cancelled : .failed; state.error = error.localizedDescription
-                        self.lock.withLock { self.active = false }
-                        self.observe?(state); continuation.resume(throwing: error)
+                        let observer = self.lock.withLock { self.activeRunID = nil; return self.observer }
+                        observer?(state); continuation.resume(throwing: error)
                     }
                 }
             }
-        }, onCancel: { self.cancel() })
+        }, onCancel: { self.cancel(runID: runID) })
     }
     private func execute(_ executable: String, _ arguments: [String], _ directory: URL?, _ password: String, _ outputFile: URL?, _ outputLimit: Int?, _ diskGuard: URL?, _ state: inout ArchiveTaskSnapshot, _ update: (String, String) -> Void) throws -> CLIResult {
         let budget = ArchiveResources.shared.budget
@@ -403,7 +434,10 @@ public final class CLIRunner: @unchecked Sendable {
         }
         let a = text(stdout) + (listing.map { text(Data(("\n" + $0.safetyFlags.sorted().joined(separator: "\n")).utf8)) } ?? ""), b = text(stderr) + (failure.map { "\n" + $0 } ?? "")
         update(a, b)
-        return CLIResult(status: failure == nil ? status : 2, stdout: a, stderr: b, cancelled: lock.withLock { cancelled } && failure == nil, listingOutput: "", parsedEntries: listing?.entries)
+        // Once the final name is published, cancellation cannot undo this output.
+        let totals = arguments.first == "x" && outputFile == nil
+            ? ExtractionTotals(output: stdout, zipAdapter: arguments.prefix(while: { $0 != "--" }).contains { $0.hasPrefix("-mcp=") }) : nil
+        return CLIResult(status: failure == nil ? status : 2, stdout: a, stderr: b, cancelled: !committed && failure == nil && lock.withLock { cancelled }, listingOutput: "", parsedEntries: listing?.entries, extractionTotals: totals)
     }
 }
 

@@ -153,6 +153,7 @@ import CoreGraphics
 
     public func fail(_ message: String, requestID id: UUID) {
         guard requestID == id else { return }
+        requestID = nil
         task?.cancel(); task = nil
         releaseResources()
         self.message = message; preparingFile = false; phase = .failed

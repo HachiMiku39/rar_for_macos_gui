@@ -2,6 +2,14 @@
 
 macOS 原生归档管理器，支持 macOS 14+、Apple Silicon 和 Intel。使用 SwiftUI 界面和独立命令行引擎，不自行实现 RAR 编解码。
 
+## 1.1.0-beta.6（build 22）
+
+- **覆盖与跳过**。等待覆盖确认时，如果另一款应用保存了同名文件，ArchiveDesk 会停止替换并保留新版本。选择“不覆盖”的条目即使随后被移走，也会保持跳过。直接解压报告显示引擎实际写入的文件数。
+- **编辑压缩包**。编辑未加密的单卷 ZIP、7z 或 RAR 时会核对原包身份，在同一磁盘保留备份，并以独占方式发布编辑结果。可编辑的原包必须是只有一个硬链接的普通文件。
+- **取消与拖出**。快速取消并启动下一项任务时，进度和日志跟随当前任务。从压缩包 A 开始拖出文件后切换到 B，Finder 延迟取数时会取消过期请求，避免取走 B 中同名的文件。
+
+本版在 Apple Silicon 上通过 106 项回归，另有 5 项跳过，0 项失败。用 5,000 个文件验证了两个内置后端，均按选择跳过 500 个、写入 4,500 个。本轮未在 Intel 实机或外置 exFAT 盘上复测。外部程序在列目录与解压之间替换源包，或在提取过程中移动目标父目录，仍有竞态风险。[验证记录](VALIDATION.md)
+
 ## 1.1.0-beta.5（build 21）
 
 - 默认直接解压到所选目录，不随机创建子文件夹，不建立完整解压暂存副本，也不额外运行整包测试。
@@ -39,7 +47,7 @@ macOS 使用 **AVFoundation / AVKit / ImageIO**，不是 iOS 的 FFmpeg 解码�
 
 ## 安装
 
-测试新版请在 [1.1.0-beta.5 发布页](https://github.com/HachiMiku39/rar_for_macos_gui/releases/tag/v1.1.0-beta.5) 下载 `ArchiveDesk-1.1.0-beta.5-universal.dmg`，退出旧 App 后把 ArchiveDesk 拖到 Applications 替换；也提供应用 ZIP、源码 ZIP 和 SHA-256 校验文件。需要旧正式版可继续下载 1.0.0。全部版本见 [Releases](https://github.com/HachiMiku39/rar_for_macos_gui/releases)。
+下载 `ArchiveDesk-1.1.0-beta.6-universal.dmg`，退出旧版后打开磁盘映像，把 ArchiveDesk 拖入“应用程序”。发布页也提供应用 ZIP、源码 ZIP 和 SHA-256 校验文件。[下载 1.1.0-beta.6](https://github.com/HachiMiku39/rar_for_macos_gui/releases/tag/v1.1.0-beta.6) · [全部版本](https://github.com/HachiMiku39/rar_for_macos_gui/releases)
 
 **1.0 正式版：** 采用圆角底板、透明留白的新 Dock 图标。CPU 主指标显示本软件占整机逻辑核心的比例（0–100%），另列活动监视器口径的进程 CPU（单核心满载为 100%，多核可超过 100%）。两项均统计 ArchiveDesk + 当前引擎，不包括其他应用。更新时先退出旧版本，再替换 Applications 中的应用。
 

@@ -8,9 +8,11 @@ Use the toolbar **Edit Archive** menu or file context menu. Only plain, single-v
 - Delete selected items and descendants. At least one item must remain.
 - Rename one regular file in its existing parent folder. Existing names and wildcard names are refused. Folder renaming is not supported.
 
-The app modifies a private copy beside the original, tests the result and verifies expected file paths. SHA-256 checks detect changes to the original during work. Before replacing it, the app saves `original.ext.ArchiveDesk-backup-UUID` beside it. Restore by copying that backup under the original name. Backups are not automatically deleted. Failure or cancellation before replacement leaves the original unchanged; cancellation cannot undo a completed replacement. Do not edit the same archive concurrently in other programs: this is not a transaction against hostile concurrent filesystem changes.
+The app edits a private copy beside the original, tests the result and verifies the expected file paths. Before publishing, it checks the SHA-256 and file identity of the original. Editing requires a regular archive file with a single hard link.
 
-Extra space is needed for original, copy, backup and staged sources. Sources are never deleted. Limits: 50000 entries, 512 MiB per file, 2 GiB listed content. Archive authenticity/signatures are not verified or preserved by a CRC test. Recovery data may need regeneration; keep the original backup.
+The app moves the original to `original.ext.ArchiveDesk-backup-UUID` and publishes the edited copy only if the original name is still available. If publishing fails, it attempts to restore the original. If another application has saved a file at that name, both that file and the backup are kept. An interruption between the two moves can require manual restoration from the backup.
+
+Allow space on the destination volume for the edited copy and staged sources. Moving the original to its backup name uses the same file data. Editing limits are 50,000 entries, 512 MiB per file and 2 GiB of listed content. Keep the original backup when signatures or recovery records matter.
 
 ## Extraction
 

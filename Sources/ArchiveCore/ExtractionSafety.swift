@@ -12,22 +12,53 @@ public enum ExtractionStaging {
     }
 }
 
-/// Explicit opt-out of staging. Conflicts are decided before any output changes.
+/// Direct extraction. Conflicts are decided before any output changes.
 /// Replaced originals are renamed to backups on the destination volume.
 /// Failed decodes deliberately retain their outputs and report that they may be incomplete.
 public enum DirectExtractor {
+    private static func writeList(_ paths: Set<String>, to url: URL) throws {
+        let fd = Darwin.open(url.path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
+        guard fd >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+        var buffer = Data()
+        for path in paths {
+            try Task.checkCancellation()
+            // 7zz removes the outer quotes after trimming the list-file line.
+            // This preserves literal quotes, a leading BOM and surrounding spaces.
+            buffer.append(34); buffer.append(contentsOf: path.utf8); buffer.append(contentsOf: [34, 10])
+            if buffer.count >= 65_536 {
+                try handle.write(contentsOf: buffer); buffer.removeAll(keepingCapacity: true)
+            }
+        }
+        try handle.write(contentsOf: buffer)
+        try handle.close()
+    }
+
     public static func extract(_ archive: URL, entries: [ArchiveEntry], destination: URL, selected: [String], engine: String, password: String, encoding: ZIPNameEncoding, runner: CLIRunner, update: @escaping (String, String) -> Void, conflict: (String) async -> ConflictChoice = { _ in .skip }) async throws -> ExtractionReport {
-        _ = try ExtractionSafety.validate(entries)
+        let totalBytes = try ExtractionSafety.validate(entries)
         try ExtractionMerger.checkDirectory(destination)
-        let rows = selected.isEmpty ? entries : entries.filter { row in selected.contains { row.path == $0 || row.path.hasPrefix($0.trimmingCharacters(in: CharacterSet(charactersIn: "/")) + "/") } }
+        if let unsafe = selected.first(where: { !ArchiveCommands.safePath($0) }) {
+            throw ArchiveError.details("Unsafe archive path: {0}", [unsafe])
+        }
+        let selection = Set(selected.map { $0.trimmingCharacters(in: CharacterSet(charactersIn: "/")) })
+        let rows = selection.isEmpty ? entries : entries.filter { row in
+            var path = row.path[...]
+            if path.last == "/" { path = path.dropLast() }
+            while !selection.contains(String(path)) {
+                guard let slash = path.lastIndex(of: "/") else { return false }
+                path = path[..<slash]
+            }
+            return true
+        }
         guard !rows.isEmpty else { throw ArchiveError.invalid("No matching archive entries.") }
-        let bytes = try ExtractionSafety.validate(rows)
-        try DiskSpace.require(bytes, at: destination)
+        let bytes = selection.isEmpty ? totalBytes : try ExtractionSafety.validate(rows)
+        var plannedBytes = bytes
         let fm = FileManager.default
         var skipped = Set<String>()
         var replacements: [(URL, stat)] = []
         var replaceAll = false
         for row in rows {
+            try Task.checkCancellation()
             let target = destination.appendingPathComponent(row.path)
             guard target.standardizedFileURL != archive.standardizedFileURL else { throw ArchiveError.invalid("The source archive cannot be replaced during direct extraction.") }
             var parent = target.deletingLastPathComponent()
@@ -37,58 +68,121 @@ public enum DirectExtractor {
                 guard errno == ENOENT else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
                 parent.deleteLastPathComponent()
             }
-            if let attrs = try? fm.attributesOfItem(atPath: target.path) {
-                let type = attrs[.type] as? FileAttributeType
-                guard type == (row.isDirectory ? .typeDirectory : .typeRegular), row.isDirectory || (attrs[.referenceCount] as? NSNumber)?.intValue == 1 else { throw ArchiveError.invalid("Links and special files cannot be exported.") }
+            if let original = try ExtractionSafety.inspect(target) {
+                guard original.st_mode & S_IFMT == (row.isDirectory ? S_IFDIR : S_IFREG),
+                      row.isDirectory || original.st_nlink == 1 else { throw ArchiveError.invalid("Links and special files cannot be exported.") }
                 if !row.isDirectory {
                     let choice = replaceAll ? ConflictChoice.replace : await conflict(row.path)
                     try Task.checkCancellation()
                     switch choice {
-                    case .skip: skipped.insert(row.path)
+                    case .skip:
+                        skipped.insert(row.path)
+                        plannedBytes -= UInt64(row.size) ?? 0
                     case .cancel: throw CancellationError()
                     case .rename: throw ArchiveError.invalid("Rename incoming files requires extraction staging.")
                     case .replace, .replaceAll:
                         if case .replaceAll = choice { replaceAll = true }
-                        var original = stat()
-                        guard lstat(target.path, &original) == 0, (original.st_mode & S_IFMT) == S_IFREG, original.st_nlink == 1 else { throw ArchiveError.invalid("Links and special files cannot be exported.") }
                         replacements.append((target, original))
                     }
                 }
             }
         }
         try Task.checkCancellation()
-        // Do not unlink originals: same-volume backups cost no second data copy.
-        // If decoding fails they remain available beside any incomplete output.
-        for (target, original) in replacements {
-            try Task.checkCancellation()
-            try ExtractionMerger.checkDirectory(target.deletingLastPathComponent())
-            var current = stat()
-            guard lstat(target.path, &current) == 0, current.st_dev == original.st_dev, current.st_ino == original.st_ino,
-                  current.st_nlink == 1, (current.st_mode & S_IFMT) == S_IFREG,
-                  current.st_size == original.st_size, current.st_mtimespec.tv_sec == original.st_mtimespec.tv_sec,
-                  current.st_mtimespec.tv_nsec == original.st_mtimespec.tv_nsec else { throw ArchiveError.invalid("The destination changed while awaiting a conflict decision.") }
-            let backup = target.deletingLastPathComponent().appendingPathComponent("ArchiveDesk-backup-" + UUID().uuidString)
-            guard renamex_np(target.path, backup.path, UInt32(RENAME_EXCL)) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        let files = rows.filter { !$0.isDirectory }
+        let plannedCount = files.count - skipped.count
+        var report = ExtractionReport(); report.totalBytes = bytes; report.processedBytes = bytes
+        if plannedCount == 0 && files.count == rows.count {
+            report.skipped = skipped.count; return report
         }
-        let result = try await runner.run(executable: engine, arguments: ArchiveCommands.extract(archive, destination: destination, selected: selected, password: password, using: .sevenZip, encoding: encoding), password: password, diskGuard: destination, update: update)
+        try DiskSpace.require(plannedBytes, at: destination)
+        var arguments = try ArchiveCommands.extract(archive, destination: destination, selected: [], password: password, using: .sevenZip, encoding: encoding)
+        arguments.insert("-spd", at: 1)
+        var listFolder: URL?
+        defer { if let listFolder { try? fm.removeItem(at: listFolder) } }
+        if !selection.isEmpty || !skipped.isEmpty {
+            let folder = fm.temporaryDirectory.appendingPathComponent("ArchiveDesk-selection-" + UUID().uuidString)
+            try fm.createDirectory(at: folder, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+            listFolder = folder
+            var switches = ["-scsUTF-8"]
+            for (paths, flag, name) in [(selection, "-i@", "include"), (skipped, "-x@", "exclude")] where !paths.isEmpty {
+                let list = folder.appendingPathComponent(name)
+                try writeList(paths, to: list)
+                switches.append(flag + list.path)
+            }
+            arguments.insert(contentsOf: switches, at: 1)
+        }
+        var backups: [(target: URL, saved: URL)] = []
+        let result: CLIResult
+        do {
+            for (target, original) in replacements {
+                try Task.checkCancellation()
+                let saved = target.deletingLastPathComponent().appendingPathComponent("ArchiveDesk-backup-" + UUID().uuidString)
+                try ExtractionSafety.moveOriginal(target, matching: original, to: saved)
+                backups.append((target, saved))
+            }
+            result = try await runner.run(executable: engine, arguments: arguments, password: password, diskGuard: destination, update: update)
+        } catch {
+            for (target, saved) in backups.reversed() {
+                // If another writer has claimed the name, leave the backup intact.
+                _ = renamex_np(saved.path, target.path, UInt32(RENAME_EXCL))
+            }
+            throw error
+        }
         if result.cancelled || Task.isCancelled { throw CancellationError() }
         guard result.status == 0 else { throw ArchiveError.invalid("Direct extraction failed. Incomplete files may remain in the destination. Check the task log.") }
-        var report = ExtractionReport(); report.totalBytes = bytes; report.backups = replacements.count
-        for row in rows where !row.isDirectory {
-            if skipped.contains(row.path) { report.skipped += 1; report.processedBytes += UInt64(row.size) ?? 0; continue }
-            let attrs = try fm.attributesOfItem(atPath: destination.appendingPathComponent(row.path).path)
-            guard attrs[.type] as? FileAttributeType == .typeRegular, (attrs[.referenceCount] as? NSNumber)?.intValue == 1, (attrs[.size] as? NSNumber)?.uint64Value == UInt64(row.size) else { throw ArchiveError.invalid("Direct extraction failed. Incomplete files may remain in the destination. Check the task log.") }
-            if let mode = attrs[.posixPermissions] as? NSNumber {
-                try fm.setAttributes([.posixPermissions: mode.intValue & 0o777], ofItemAtPath: destination.appendingPathComponent(row.path).path)
-            }
-            report.written += 1; report.processedBytes += UInt64(row.size) ?? 0
+        guard let totals = result.extractionTotals, totals.files <= plannedCount, totals.bytes <= plannedBytes,
+              totals.files != plannedCount || totals.bytes == plannedBytes else {
+            throw ArchiveError.invalid("The extraction tool did not confirm the number of files written. Check the destination and the task log.")
         }
+        var differentSizes = 0
+        for row in files where !skipped.contains(row.path) {
+            try Task.checkCancellation()
+            let target = destination.appendingPathComponent(row.path)
+            guard let info = try ExtractionSafety.inspect(target), info.st_mode & S_IFMT == S_IFREG,
+                  info.st_nlink == 1, info.st_size >= 0 else { throw ArchiveError.invalid("Direct extraction failed. Incomplete files may remain in the destination. Check the task log.") }
+            if UInt64(info.st_size) != UInt64(row.size) { differentSizes += 1 }
+        }
+        // A concurrent writer can win -aos with content of any size. Both bundled
+        // decoders restrict permissions during creation; never chmod this path here.
+        guard differentSizes <= plannedCount - totals.files else { throw ArchiveError.invalid("Direct extraction failed. Incomplete files may remain in the destination. Check the task log.") }
+        report.written = totals.files; report.skipped = files.count - totals.files; report.backups = backups.count
         return report
     }
 }
 
 /// General archives are not subject to mobile-inspector byte limits.
 public enum ExtractionSafety {
+    static func inspect(_ url: URL) throws -> stat? {
+        var info = stat()
+        if lstat(url.path, &info) == 0 { return info }
+        guard errno == ENOENT else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        return nil
+    }
+
+    /// Keep the conflict decision tied to the file observed before prompting.
+    static func moveOriginal(_ target: URL, matching original: stat, to saved: URL) throws {
+        func matches(_ current: stat) -> Bool {
+            current.st_dev == original.st_dev && current.st_ino == original.st_ino &&
+                current.st_mode == original.st_mode && (current.st_mode & S_IFMT) == S_IFREG &&
+                current.st_nlink == 1 && current.st_size == original.st_size &&
+                current.st_mtimespec.tv_sec == original.st_mtimespec.tv_sec &&
+                current.st_mtimespec.tv_nsec == original.st_mtimespec.tv_nsec
+        }
+        try ExtractionMerger.checkDirectory(target.deletingLastPathComponent())
+        guard let current = try inspect(target), matches(current),
+              current.st_ctimespec.tv_sec == original.st_ctimespec.tv_sec,
+              current.st_ctimespec.tv_nsec == original.st_ctimespec.tv_nsec else {
+            throw ArchiveError.invalid("The destination changed while awaiting a conflict decision.")
+        }
+        guard renamex_np(target.path, saved.path, UInt32(RENAME_EXCL)) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        do {
+            guard let moved = try inspect(saved), matches(moved) else { throw ArchiveError.invalid("The destination changed while awaiting a conflict decision.") }
+        } catch {
+            _ = renamex_np(saved.path, target.path, UInt32(RENAME_EXCL))
+            throw error
+        }
+    }
+
     public static func validate(_ entries: [ArchiveEntry], compressedBytes: UInt64 = 0) throws -> UInt64 {
         guard entries.count <= ArchiveResources.shared.budget.entryLimit else { throw ArchiveError.invalid("Archive entry index exceeds the current memory budget.") }
         var names = Set<String>(), files = Set<String>(), total: UInt64 = 0
@@ -132,6 +226,12 @@ public enum ExtractionSafety {
     /// Copy into a private sibling and publish only after the whole file is durable.
     /// The source was already verified by the decoder before merging starts.
     public static func copyVerifiedFile(_ source: URL, to target: URL, replacing: Bool, progress: (UInt64, UInt64) -> Void = { _, _ in }) throws -> Bool {
+        let original = replacing ? try inspect(target) : nil
+        guard !replacing || original != nil else { throw ArchiveError.invalid("The destination changed while awaiting a conflict decision.") }
+        return try copyVerifiedFile(source, to: target, expecting: original, progress: progress)
+    }
+
+    static func copyVerifiedFile(_ source: URL, to target: URL, expecting original: stat?, progress: (UInt64, UInt64) -> Void) throws -> Bool {
         let fm = FileManager.default
         try ExtractionMerger.checkDirectory(target.deletingLastPathComponent())
         let input = Darwin.open(source.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
@@ -174,13 +274,13 @@ public enum ExtractionSafety {
         try Task.checkCancellation()
         try ExtractionMerger.checkDirectory(target.deletingLastPathComponent())
         var backup: URL?
-        if replacing {
+        if let original {
             let saved = target.deletingLastPathComponent().appendingPathComponent(target.lastPathComponent + ".ArchiveDesk-backup-" + UUID().uuidString)
-            try fm.moveItem(at: target, to: saved); backup = saved
+            try moveOriginal(target, matching: original, to: saved); backup = saved
         }
         // Exclusive publication never follows an existing symlink or overwrites a race winner.
         if Darwin.link(partial.path, target.path) != 0 {
-            if let backup, !fm.fileExists(atPath: target.path) { try? fm.moveItem(at: backup, to: target) }
+            if let backup { _ = renamex_np(backup.path, target.path, UInt32(RENAME_EXCL)) }
             throw ArchiveError.invalid("Cannot publish output; destination exists or is unavailable.")
         }
         progress(UInt64(copied), UInt64(info.st_size))

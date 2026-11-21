@@ -463,6 +463,7 @@
     "Direct mode asks before replacing existing files and keeps originals as backups. Failed or cancelled tasks may leave incomplete files.": "直接展開では同名ファイルの処理を確認し、元ファイルをバックアップとして残します。失敗やキャンセルで不完全なファイルが残る場合があります。",
     "Rename incoming files requires extraction staging.": "展開ファイルの名前変更にはステージングが必要です。",
     "The destination changed while awaiting a conflict decision.": "同名ファイルの処理を確認中に出力先が変更されました。",
+    "The extraction tool did not confirm the number of files written. Check the destination and the task log.": "実際に書き込まれたファイル数を展開ツールで確認できませんでした。出力先とタスクログを確認してください。",
     "The source archive cannot be replaced during direct extraction.": "直接展開で元のアーカイブを上書きすることはできません。",
     "No matching archive entries.": "一致するアーカイブ項目がありません。",
     "Staging uses the destination disk. Files are verified before publication.": "出力先ディスクでステージングし、ファイルを検証してから公開します。"

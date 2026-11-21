@@ -87,21 +87,28 @@ import ArchiveCore
     @Published var rar = UserDefaults.standard.string(forKey: "rar") ?? "/opt/homebrew/bin/rar"
     @Published var unrar = UserDefaults.standard.string(forKey: "unrar") ?? "/opt/homebrew/bin/unrar"
     @Published var sevenZip = UserDefaults.standard.string(forKey: "sevenZipOverrideV2") ?? ""
-    private var session: ArchiveSession?
+    private var sessionID = UUID()
+    private var session: ArchiveSession? { didSet { sessionID = UUID() } }
     var bundledSevenZip: String { Bundle.main.resourceURL?.appendingPathComponent("Tools/7zz").path ?? "" }
     var resolvedSevenZip: String { sevenZip.isEmpty ? bundledSevenZip : sevenZip }
     let runner = CLIRunner()
     init() {
         ArchiveResources.shared.configure(memoryMode)
-        runner.observe = { [weak self] snapshot in Task { @MainActor in
-            guard let self, self.busy else { return }
-            self.engineTask = snapshot
-            if snapshot.state == .queued || snapshot.state == .running {
-                self.progress = snapshot.fraction
-                self.currentTaskFile = ""
-                self.taskPhase = ["a": "Compressing", "x": "Extracting", "t": "Verifying", "l": "Reading archive", "lt": "Reading archive"][snapshot.operation] ?? "Processing"
+    }
+    private nonisolated func updateTask(_ id: UUID, _ apply: @escaping @MainActor (Model) -> Void) {
+        Task { @MainActor in
+            guard busy, monitorID == id else { return }
+            apply(self)
+        }
+    }
+    private func taskLog(stdoutLimit: Int? = 100_000) -> (String, String) -> Void {
+        let id = monitorID
+        return { stdout, stderr in
+            self.updateTask(id) { model in
+                model.stdout = stdoutLimit.map { String(stdout.suffix($0)) } ?? stdout
+                model.stderr = stdoutLimit == nil ? stderr : String(stderr.suffix(100_000))
             }
-        } }
+        }
     }
     private func startMonitoring() {
         monitorTask?.cancel(); monitorID = UUID()
@@ -109,6 +116,16 @@ import ArchiveCore
         hasTaskReport = false; cancellingTask = false; taskHadError = false; taskResult = "running"; lastPhaseProgress = nil
         taskStartedAt = ProcessInfo.processInfo.systemUptime; taskElapsed = 0
         let id = monitorID, engine = runner, location = monitorLocation ?? FileManager.default.temporaryDirectory
+        runner.observe = { [weak self] snapshot in
+            self?.updateTask(id) { model in
+                model.engineTask = snapshot
+                if snapshot.state == .queued || snapshot.state == .running {
+                    model.progress = snapshot.fraction
+                    model.currentTaskFile = ""
+                    model.taskPhase = ["a": "Compressing", "x": "Extracting", "t": "Verifying", "l": "Reading archive", "lt": "Reading archive"][snapshot.operation] ?? "Processing"
+                }
+            }
+        }
         resourceSample = ResourceSample(); engineTask = nil; progress = nil; taskPhase = "Preparing"; currentTaskFile = ""
         monitorTask = Task.detached(priority: .utility) { [weak self] in
             var sampler = ResourceSampler()
@@ -133,6 +150,7 @@ import ArchiveCore
         lastPhaseProgress = progress
         taskResult = taskHadError ? "failed" : (cancellingTask || (queueRunning && queue.contains { $0.state == "cancelled" })) ? "cancelled" : "completed"
         monitorTask?.cancel(); monitorTask = nil; monitorID = UUID(); monitorLocation = nil
+        runner.observe = nil
         // Keep the final report visible, even if the archive finished between samples.
         if hasTaskReport { progressWindow.refreshTitle() }
     }
@@ -229,6 +247,7 @@ import ArchiveCore
         let rows = entries, engine = resolvedSevenZip, encoding = zipEncoding, engineRunner = runner
         var secret = password
         busy = true; copyRequestID = requestID; status = language.text("Preparing file export")
+        let log = taskLog(stdoutLimit: nil)
         exportTask = Task {
             defer { copyRequestID = nil; busy = false; progress = nil }
             while !Task.isCancelled {
@@ -238,13 +257,11 @@ import ArchiveCore
                     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
                     let attemptSecret = secret
                     let work = Task.detached(priority: .userInitiated) {
-                        let file = try await SingleFileExporter.export(item, entries: rows, source: source, root: root, engine: engine, password: attemptSecret, encoding: encoding, runner: engineRunner) { a, b in
-                            Task { @MainActor in self.stdout = a; self.stderr = b }
-                        }
+                        let file = try await SingleFileExporter.export(item, entries: rows, source: source, root: root, engine: engine, password: attemptSecret, encoding: encoding, runner: engineRunner, update: log)
                         if inspect { try PreviewSafety.validate(file, inside: root) }
                         return file
                     }
-                    let file = try await withTaskCancellationHandler(operation: { try await work.value }, onCancel: { work.cancel(); engineRunner.cancel() })
+                    let file = try await withTaskCancellationHandler(operation: { try await work.value }, onCancel: { work.cancel() })
                     try Task.checkCancellation()
                     if retainUntilQuit { openedCopies.append(root) }
                     password = attemptSecret
@@ -291,14 +308,17 @@ import ArchiveCore
     }
     func dragProvider(_ item: ArchiveEntry) -> NSItemProvider {
         let provider = NSItemProvider(); provider.suggestedName = item.name
-        guard !busy, !item.isDirectory, !item.isLink else { return provider }
+        guard !busy, !item.isDirectory, !item.isLink, session != nil else { return provider }
+        let sourceSessionID = sessionID
         let type = UTType(filenameExtension: item.suffix) ?? .data
         provider.registerFileRepresentation(forTypeIdentifier: type.identifier, fileOptions: [], visibility: .all) { completion in
             let progress = Progress(totalUnitCount: 1)
             let requestID = UUID()
             progress.cancellationHandler = { Task { @MainActor in if self.copyRequestID == requestID { self.cancelCurrentTask() } } }
             Task { @MainActor in
-                if progress.isCancelled { completion(nil, false, CancellationError()); return }
+                guard !progress.isCancelled, self.sessionID == sourceSessionID else {
+                    completion(nil, false, CancellationError()); return
+                }
                 self.prepareCopy(item, inspect: false, requestID: requestID) { result in
                     switch result {
                     case .success(let url): progress.completedUnitCount = 1; completion(url, false, nil)
@@ -324,18 +344,22 @@ import ArchiveCore
         let jobs = queue.map { BatchArchive(source: $0.source) }; queue = jobs
         let engine = resolvedSevenZip, policy = extractionPolicy, engineRunner = runner, useStaging = extractionUseStaging
         monitorLocation = parent; busy = true; queueRunning = true
+        let log = taskLog(stdoutLimit: nil), id = monitorID
         presentTaskProgress("Batch extraction queue")
         exportTask = Task {
             defer { busy = false; queueRunning = false; progress = nil }
             let work = Task.detached(priority: .userInitiated) {
                 await BatchArchives.execute(jobs, process: { job in
                     await self.resetConflictChoice()
-                    return try await BatchExtractor.extract(job.source, parent: parent, engine: engine, runner: engineRunner, password: secret, encoding: encoding, policy: policy, conflict: { path in await self.askConflict(path) }, update: { a, b in
-                        Task { @MainActor in self.stdout = a; self.stderr = b }
-                    }, progress: { report in Task { @MainActor in self.updateTaskPhase("Publishing files", fraction: report.fraction); self.currentTaskFile = report.currentFile } }, useStaging: useStaging)
+                    return try await BatchExtractor.extract(job.source, parent: parent, engine: engine, runner: engineRunner, password: secret, encoding: encoding, policy: policy, conflict: { path in await self.askConflict(path) }, update: log, progress: { report in
+                        self.updateTask(id) { model in
+                            model.updateTaskPhase("Publishing files", fraction: report.fraction)
+                            model.currentTaskFile = report.currentFile
+                        }
+                    }, useStaging: useStaging)
                 }, update: { job in await self.acceptJob(job) })
             }
-            _ = await withTaskCancellationHandler(operation: { await work.value }, onCancel: { work.cancel(); engineRunner.cancel() })
+            _ = await withTaskCancellationHandler(operation: { await work.value }, onCancel: { work.cancel() })
             status = language.text("Batch finished. Check each task result.")
         }
     }
@@ -395,10 +419,10 @@ import ArchiveCore
             }
         } catch { self.error = language.message(error) }
     }
-    func cancelInspection() { inspectionTask?.cancel(); inspectionRunner.cancel(); inspectionID = UUID() }
+    func cancelInspection() { inspectionTask?.cancel(); inspectionID = UUID() }
     func cancelCurrentTask() {
         if busy { cancellingTask = true }
-        exportTask?.cancel(); runner.cancel()
+        exportTask?.cancel()
         if let alert = conflictAlert { alert.window.sheetParent?.endSheet(alert.window, returnCode: .abort) }
     }
     func inspectPackage() {
@@ -416,7 +440,7 @@ import ArchiveCore
                 }
             }
             do {
-                let report = try await withTaskCancellationHandler(operation: { try await work.value }, onCancel: { work.cancel(); engineRunner.cancel() })
+                let report = try await withTaskCancellationHandler(operation: { try await work.value }, onCancel: { work.cancel() })
                 if inspectionID == id { packageReport = report }
             } catch {
                 if inspectionID == id {
@@ -430,10 +454,7 @@ import ArchiveCore
         guard !busy else { return }
         guard archive != nil, !entries.isEmpty else { return }
         guard entries.allSatisfy({ ArchiveCommands.safePath($0.path) && !$0.isLink }) else { error = language.text("This archive contains unsafe paths or links. Extraction was refused; inspect it with a trusted tool."); return }
-        let chosen = selected ? entries.filter { item in
-            selection.contains(item.path) || selection.contains { item.path.hasPrefix($0.trimmingCharacters(in: CharacterSet(charactersIn: "/")) + "/") }
-        }.map(\.path) : []
-        guard !selected || !chosen.isEmpty else { return }
+        guard !selected || !selection.isEmpty else { return }
         // Preserve directory selections instead of expanding thousands of paths into argv.
         extractionSelection = selected ? Array(selection).sorted() : []; showExtraction = true
     }
@@ -454,13 +475,11 @@ import ArchiveCore
             let source = session?.workingURL ?? archive, chosen = extractionSelection, secret = password, engine = resolvedSevenZip, engineRunner = runner
             let policy = extractionPolicy, openFolder = extractionOpenFolder, encoding = zipEncoding
             let mobile = packageKind != nil && useStaging
+            let log = taskLog(), id = monitorID
             exportTask = Task {
                 defer { busy = false; progress = nil; if useStaging { try? FileManager.default.removeItem(at: stage) } }
                 do {
                     let work = Task.detached(priority: .userInitiated) {
-                        let log: (String, String) -> Void = { a, b in
-                            Task { @MainActor in self.stdout = String(a.suffix(100_000)); self.stderr = String(b.suffix(100_000)) }
-                        }
                         if mobile {
                             _ = try await PackageExporter.extract(archive: source, destination: stage, selected: chosen, sevenZip: engine, password: secret, runner: engineRunner, update: log)
                         } else {
@@ -471,11 +490,11 @@ import ArchiveCore
                             let rows = listed.archiveEntries(backend: .sevenZip)
                             let compressed = UInt64((try? source.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
                             _ = try ExtractionSafety.validate(rows, compressedBytes: compressed)
-                            let selectedRows = chosen.isEmpty ? rows : rows.filter { row in chosen.contains { row.path == $0 || row.path.hasPrefix($0.trimmingCharacters(in: CharacterSet(charactersIn: "/")) + "/") } }
-                            let estimated = try ExtractionSafety.validate(selectedRows)
                             if !useStaging {
                                 return try await DirectExtractor.extract(source, entries: rows, destination: destination, selected: chosen, engine: engine, password: secret, encoding: encoding, runner: engineRunner, update: log, conflict: { path in await self.askConflict(path) })
                             }
+                            let selectedRows = chosen.isEmpty ? rows : rows.filter { row in chosen.contains { row.path == $0 || row.path.hasPrefix($0.trimmingCharacters(in: CharacterSet(charactersIn: "/")) + "/") } }
+                            let estimated = try ExtractionSafety.validate(selectedRows)
                             try DiskSpace.requireStaging(estimated, stage: stage, destination: destination)
                             try Task.checkCancellation()
                             let extracted = try await engineRunner.run(executable: engine, arguments: ArchiveCommands.extract(source, destination: stage, selected: chosen, password: secret, using: .sevenZip, encoding: encoding), password: secret, diskGuard: stage, update: log)
@@ -485,14 +504,13 @@ import ArchiveCore
                         await self.updateTaskPhase("Publishing files", fraction: nil)
                         return try await ExtractionMerger.merge(from: stage, to: destination, policy: policy, conflict: { path in
                             await self.askConflict(path)
-                        }) { report in Task { @MainActor in
-                            guard self.busy else { return }
-                            self.status = self.extractionSummary(report)
-                            self.updateTaskPhase("Publishing files", fraction: report.fraction)
-                            self.currentTaskFile = report.currentFile
+                        }) { report in self.updateTask(id) { model in
+                            model.status = model.extractionSummary(report)
+                            model.updateTaskPhase("Publishing files", fraction: report.fraction)
+                            model.currentTaskFile = report.currentFile
                         } }
                     }
-                    let report = try await withTaskCancellationHandler(operation: { try await work.value }, onCancel: { work.cancel(); engineRunner.cancel() })
+                    let report = try await withTaskCancellationHandler(operation: { try await work.value }, onCancel: { work.cancel() })
                     status = extractionSummary(report)
                     if openFolder { NSWorkspace.shared.open(destination) }
                 } catch is CancellationError {
@@ -561,14 +579,13 @@ import ArchiveCore
         guard alert.runModal() == .alertFirstButtonReturn else { return }
         cancelInspection(); busy = true; stdout = ""; stderr = ""; status = language.text("Editing archive copy")
         let engine = resolvedSevenZip, rarEngine = rar, engineRunner = runner
+        let log = taskLog()
         exportTask = Task {
             do {
                 let work = Task.detached(priority: .userInitiated) {
-                    try await ArchiveEditor.apply(edit, archive: archive, sevenZip: engine, rar: rarEngine, runner: engineRunner) { a, b in
-                        Task { @MainActor in self.stdout = String(a.suffix(100_000)); self.stderr = String(b.suffix(100_000)) }
-                    }
+                    try await ArchiveEditor.apply(edit, archive: archive, sevenZip: engine, rar: rarEngine, runner: engineRunner, update: log)
                 }
-                let backup = try await withTaskCancellationHandler(operation: { try await work.value }, onCancel: { work.cancel(); engineRunner.cancel() })
+                let backup = try await withTaskCancellationHandler(operation: { try await work.value }, onCancel: { work.cancel() })
                 busy = false; browse()
                 let done = NSAlert(); done.messageText = language.text("Archive updated")
                 done.informativeText = language.text("Original backup: {0}", backup.path); done.addButton(withTitle: language.text("OK"))
@@ -579,15 +596,14 @@ import ArchiveCore
     private func exportPackage(_ archive: URL, to destination: URL, selected: [String]) {
         busy = true; progress = nil; stdout = ""; stderr = ""; status = language.text("Exporting Package")
         let engine = resolvedSevenZip, secret = password, engineRunner = runner
+        let log = taskLog()
         exportTask = Task {
             defer { busy = false; progress = nil }
             do {
                 let work = Task.detached(priority: .userInitiated) {
-                    try await PackageExporter.extract(archive: archive, destination: destination, selected: selected, sevenZip: engine, password: secret, runner: engineRunner) { a, b in
-                        Task { @MainActor in self.stdout = String(a.suffix(100_000)); self.stderr = String(b.suffix(100_000)) }
-                    }
+                    try await PackageExporter.extract(archive: archive, destination: destination, selected: selected, sevenZip: engine, password: secret, runner: engineRunner, update: log)
                 }
-                let renamed = try await withTaskCancellationHandler(operation: { try await work.value }, onCancel: { work.cancel(); engineRunner.cancel() })
+                let renamed = try await withTaskCancellationHandler(operation: { try await work.value }, onCancel: { work.cancel() })
                 status = renamed == 0 ? language.text("Package Export Complete") : language.text("Export complete. Conflicting names were renamed; see the path-map JSON.")
                 NSWorkspace.shared.activateFileViewerSelecting([destination])
             } catch {
@@ -620,16 +636,17 @@ import ArchiveCore
             let engine = options.format == .rar ? rar : resolvedSevenZip, source = inputs, engineRunner = runner
             monitorLocation = selectedOutput.deletingLastPathComponent()
             showCreate = false; busy = true; stdout = ""; stderr = ""; status = language.text("Create Archive")
+            let log = taskLog(), id = monitorID
             presentTaskProgress("Create Archive")
             exportTask = Task {
                 defer { busy = false; progress = nil }
                 do {
                     let work = Task.detached(priority: .userInitiated) {
                         try await ArchiveCreator.create(output: selectedOutput, inputs: source, password: secret, headers: headers, volumeMB: volume, recovery: recovery, options: options, executable: engine, runner: engineRunner, phase: { phase, fraction in
-                            Task { @MainActor in self.updateTaskPhase(phase, fraction: fraction) }
-                        }) { a, b in Task { @MainActor in self.stdout = String(a.suffix(100_000)); self.stderr = String(b.suffix(100_000)) } }
+                            self.updateTask(id) { $0.updateTaskPhase(phase, fraction: fraction) }
+                        }, update: log)
                     }
-                    let output = try await withTaskCancellationHandler(operation: { try await work.value }, onCancel: { work.cancel(); engineRunner.cancel() })
+                    let output = try await withTaskCancellationHandler(operation: { try await work.value }, onCancel: { work.cancel() })
                     status = language.text("{0} · Done", language.text("Create Archive"))
                     NSWorkspace.shared.activateFileViewerSelecting([output])
                 } catch is CancellationError { cancellingTask = true; status = language.text("Cancelled. No unfinished archive was published.") }
@@ -665,6 +682,7 @@ import ArchiveCore
     func launch(_ title: String, executable: String, args: [String], directory: URL? = nil, secret: String = "", preparing: URL? = nil, verification: [String]? = nil, completion: @escaping () -> Void = {}, success: @escaping (CLIResult) -> Void = { _ in }) {
         guard !busy else { return }
         busy = true; progress = nil; stdout = ""; stderr = ""; status = title
+        let log = taskLog(stdoutLimit: 200_000)
         if ["a", "x", "t"].contains(args.first ?? "") { presentTaskProgress(title) }
         exportTask = Task {
             defer { busy = false; progress = nil; completion() }
@@ -672,16 +690,10 @@ import ArchiveCore
                 var actualArgs = args
                 if let preparing {
                     session = nil
-                    session = try await ArchiveSession.prepare(preparing, sevenZip: executable, runner: runner) { a, b in
-                        Task { @MainActor in self.stdout = String(a.suffix(200_000)); self.stderr = String(b.suffix(100_000)) }
-                    }
+                    session = try await ArchiveSession.prepare(preparing, sevenZip: executable, runner: runner, update: log)
                     actualArgs = try ArchiveCommands.list(session!.workingURL, password: secret, using: .sevenZip, encoding: zipEncoding)
                 }
-                let result = try await runner.run(executable: executable, arguments: actualArgs, directory: directory, password: secret) { a, b in
-                    Task { @MainActor in
-                        self.stdout = String(a.suffix(200_000)); self.stderr = String(b.suffix(100_000))
-                    }
-                }
+                let result = try await runner.run(executable: executable, arguments: actualArgs, directory: directory, password: secret, update: log)
                 stdout = String(result.stdout.suffix(200_000)); stderr = String(result.stderr.suffix(100_000))
                 if result.cancelled { cancellingTask = true; status = language.text("Cancelled. Partial output may remain; check the destination.") }
                 else if result.status == 0 {
